@@ -8,6 +8,8 @@ import io.legado.app.constant.AppLog
 import io.legado.app.constant.LogModule
 import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
+import io.legado.app.help.AppFreezeMonitor
+import io.legado.app.help.DispatchersMonitor
 import io.legado.app.utils.GSON
 import io.legado.app.utils.canvasrecorder.CanvasRecorderFactory
 import io.legado.app.utils.defaultSharedPreferences
@@ -19,6 +21,7 @@ import io.legado.app.utils.getPrefLong
 import io.legado.app.utils.getPrefString
 import io.legado.app.utils.getPrefStringSet
 import io.legado.app.utils.isNightMode
+import io.legado.app.utils.LogUtils
 import io.legado.app.utils.parseIpsFromString
 import io.legado.app.utils.putPrefBoolean
 import io.legado.app.utils.putPrefInt
@@ -172,7 +175,13 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             PreferKey.optimizeRender -> optimizeRender = CanvasRecorderFactory.isSupport
                     && appCtx.getPrefBoolean(PreferKey.optimizeRender, false)
 
-            PreferKey.logShownModules -> logShownModules = readLogShownModules()
+            PreferKey.logShownModules -> {
+                logShownModules = readLogShownModules()
+                LogUtils.upLevel()
+                LogUtils.logDeviceInfo()
+                AppFreezeMonitor.init(appCtx)
+                DispatchersMonitor.init()
+            }
 
         }
     }
@@ -357,6 +366,25 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val showDiscovery: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.showDiscovery, true)
 
+    /** 聚合主页：默认关闭，需在界面设置中手动开启 */
+    val showHomepage: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.showHomepage, false)
+
+    /** 聚合主页中隐藏的集 URL 列表（GSON 序列化的 Set<String>） */
+    var homepageSourceHidden: String
+        get() = appCtx.getPrefString(PreferKey.homepageSourceHidden, "") ?: ""
+        set(value) = appCtx.putPrefString(PreferKey.homepageSourceHidden, value)
+
+    /** 聚合主页布局模式：0 = 混合列表（默认），1 = 分源Tab */
+    var homepageLayoutMode: Int
+        get() = appCtx.getPrefInt(PreferKey.homepageLayoutMode, 0)
+        set(value) = appCtx.putPrefInt(PreferKey.homepageLayoutMode, value)
+
+    /** 分源Tab 模式预加载：0 = 仅当前集（默认），1 = 当前集 + 相邻集 */
+    var homepagePreload: Int
+        get() = appCtx.getPrefInt(PreferKey.homepagePreload, 0)
+        set(value) = appCtx.putPrefInt(PreferKey.homepagePreload, value)
+
     val modernDiscoveryPage: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.modernDiscoveryPage, true)
 
@@ -381,7 +409,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     var modernDiscoveryLayout: Int
-        get() = appCtx.getPrefInt(PreferKey.modernDiscoveryLayout, 0).coerceIn(0, 2)
+        get() = appCtx.getPrefInt(PreferKey.modernDiscoveryLayout, 2).coerceIn(0, 2)
         set(value) = appCtx.putPrefInt(PreferKey.modernDiscoveryLayout, value.coerceIn(0, 2))
 
     var modernRssSourceUrl: String?
@@ -1362,7 +1390,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     var blurExcludeText: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.blurExcludeText)
+        get() = appCtx.getPrefBoolean(PreferKey.blurExcludeText, true)
         set(value) {
             appCtx.putPrefBoolean(PreferKey.blurExcludeText, value)
         }
@@ -2189,42 +2217,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.enableMangaGray, false)
         set(value) {
             appCtx.putPrefBoolean(PreferKey.enableMangaGray, value)
-        }
-
-    var welcomeImage
-        get() = appCtx.getPrefString(PreferKey.welcomeImage)
-        set(value) {
-            appCtx.putPrefString(PreferKey.welcomeImage, value)
-        }
-
-    var welcomeShowText
-        get() = appCtx.getPrefBoolean(PreferKey.welcomeShowText, true)
-        set(value) {
-            appCtx.putPrefBoolean(PreferKey.welcomeShowText, value)
-        }
-
-    var welcomeShowIcon
-        get() = appCtx.getPrefBoolean(PreferKey.welcomeShowIcon, true)
-        set(value) {
-            appCtx.putPrefBoolean(PreferKey.welcomeShowIcon, value)
-        }
-
-    var welcomeImageDark
-        get() = appCtx.getPrefString(PreferKey.welcomeImageDark)
-        set(value) {
-            appCtx.putPrefString(PreferKey.welcomeImageDark, value)
-        }
-
-    var welcomeShowTextDark
-        get() = appCtx.getPrefBoolean(PreferKey.welcomeShowTextDark, true)
-        set(value) {
-            appCtx.putPrefBoolean(PreferKey.welcomeShowTextDark, value)
-        }
-
-    var welcomeShowIconDark
-        get() = appCtx.getPrefBoolean(PreferKey.welcomeShowIconDark, true)
-        set(value) {
-            appCtx.putPrefBoolean(PreferKey.welcomeShowIconDark, value)
         }
 
 }

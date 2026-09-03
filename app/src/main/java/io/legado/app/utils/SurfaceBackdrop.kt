@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
@@ -19,6 +20,8 @@ import android.widget.TextView
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.surface.SurfaceDrawable
 import io.legado.app.lib.theme.surface.SurfaceStyle
+import java.io.File
+import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
 private const val SURFACE_STABLE_FRAME_DELAY_MS = 16L
@@ -26,6 +29,7 @@ private const val SURFACE_STABLE_FRAME_LIMIT = 24
 private const val SURFACE_PIXEL_COPY_RETRIES = 2
 private const val SURFACE_PIXEL_COPY_TIMEOUT_MS = 800L
 private const val SURFACE_BLUR_SAMPLE = 4
+private const val PANEL_BACKDROP_MAX_DIMENSION = 1080
 
 /**
  * 模糊背景离屏采集的渲染状态：开启"模糊背景不含文字"时，采集窗口内容期间置位，
@@ -58,8 +62,8 @@ fun Context.findHostWindow(): Window? {
 /**
  * 统一的玻璃表面生命周期。
  *
- * 调用方必须明确提供真正承载表面的 View；这里不遍历布局、不猜最大子节点，也不反射
- * PopupWindow 私有字段。窗口适配器只负责在显示前隐藏自己的窗口，并在 [onReady] 后显示。
+ * 调用方必须明确提供真正承载背景的 target 和完整逻辑浮层 layerOwner。展示层只在 attach
+ * 后登记，并以登记顺序确定上下关系；采集只合成请求层以下的内容，不反射或猜测窗口根。
  */
 object SurfaceBackdrop {
 
@@ -71,8 +75,36 @@ object SurfaceBackdrop {
         var attachListener: View.OnAttachStateChangeListener? = null
     )
 
+    private data class PresentedLayer(
+        val owner: WeakReference<View>,
+        val hostDecor: WeakReference<View>,
+        val targets: ArrayList<WeakReference<View>>,
+        val order: Long
+    )
+
+    private data class LayerSnapshot(
+        val owner: View,
+        val surfaces: List<View>,
+        val order: Long
+    )
+
+    private data class CaptureComposition(
+        val allLayers: List<LayerSnapshot>,
+        val sameWindowOwners: List<View>,
+        val lowerLayers: List<LayerSnapshot>
+    )
+
     private val states = WeakHashMap<View, State>()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val presentedLayers = WeakHashMap<View, PresentedLayer>()
+    private val paperContentRoots = WeakHashMap<View, Unit>()
+    private var nextPresentationOrder = 0L
+
+    fun excludeFromPaperCapture(contentRoot: View) {
+        synchronized(paperContentRoots) {
+            paperContentRoots[contentRoot] = Unit
+        }
+    }
 
     fun installStatic(target: View, style: SurfaceStyle) {
         val state = stateFor(target)
@@ -99,7 +131,7 @@ object SurfaceBackdrop {
         hostWindow: Window,
         target: View,
         style: SurfaceStyle,
-        clearSameWindowSurfaceBeforeCapture: Boolean = false,
+        layerOwner: View,
         onReady: () -> Unit = {}
     ) {
         val state = stateFor(target)
@@ -124,35 +156,39 @@ object SurfaceBackdrop {
             onReady()
         }
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || style.blurRadiusPx <= 0) {
-            finish(null)
-            return
-        }
         val hostDecor = hostWindow.decorView
-        val sameWindow = target.rootView === hostDecor.rootView
-        if (sameWindow && clearSameWindowSurfaceBeforeCapture) {
-            val transparentStyle = style.copy(
-                tintColor = Color.TRANSPARENT,
-                strokeColor = Color.TRANSPARENT
-            )
-            target.background = SurfaceDrawable(null, transparentStyle)
-            target.invalidate()
-        }
+        val staticBackdrop = style.backdropImagePath
+        val captureEnabled = staticBackdrop == null &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            style.blurRadiusPx > 0
 
         awaitStableBounds(
             target = target,
             hostDecor = hostDecor,
             generationValid = { state.generation == generation },
             onStable = {
-                requestBackdrop(
-                    hostWindow = hostWindow,
-                    hostDecor = hostDecor,
-                    target = target,
-                    radius = style.blurRadiusPx,
-                    generationValid = { state.generation == generation },
-                    attempt = 0,
-                    onFinished = ::finish
-                )
+                presentLayer(hostDecor, target, layerOwner)
+                if (staticBackdrop != null) {
+                    // 主题面板底图：解码在后台线程完成，完成后按当前代次安装；
+                    // 代次已过期或目标已脱离时由 finish 统一回收。
+                    Thread {
+                        val bitmap = decodeStaticBackdrop(staticBackdrop)
+                        mainHandler.post { finish(bitmap) }
+                    }.start()
+                } else if (captureEnabled) {
+                    requestBackdrop(
+                        hostWindow = hostWindow,
+                        hostDecor = hostDecor,
+                        target = target,
+                        layerOwner = layerOwner,
+                        radius = style.blurRadiusPx,
+                        generationValid = { state.generation == generation },
+                        attempt = 0,
+                        onFinished = ::finish
+                    )
+                } else {
+                    finish(null)
+                }
             },
             onFailure = { finish(null) }
         )
@@ -162,7 +198,7 @@ object SurfaceBackdrop {
     fun refresh(
         hostWindow: Window,
         target: View,
-        clearSameWindowSurfaceBeforeCapture: Boolean = false,
+        layerOwner: View,
         onReady: () -> Unit = {}
     ) {
         val style = states[target]?.style
@@ -174,7 +210,7 @@ object SurfaceBackdrop {
             hostWindow = hostWindow,
             target = target,
             style = style,
-            clearSameWindowSurfaceBeforeCapture = clearSameWindowSurfaceBeforeCapture,
+            layerOwner = layerOwner,
             onReady = onReady
         )
     }
@@ -183,7 +219,7 @@ object SurfaceBackdrop {
     fun refresh(
         hostWindow: Window,
         targets: Iterable<View>,
-        clearSameWindowSurfaceBeforeCapture: Boolean = false,
+        layerOwner: View,
         onReady: () -> Unit = {}
     ) {
         val pendingTargets = targets.filter { states[it]?.style != null }
@@ -196,7 +232,7 @@ object SurfaceBackdrop {
             refresh(
                 hostWindow = hostWindow,
                 target = target,
-                clearSameWindowSurfaceBeforeCapture = clearSameWindowSurfaceBeforeCapture
+                layerOwner = layerOwner
             ) {
                 remaining -= 1
                 if (remaining == 0) onReady()
@@ -205,6 +241,7 @@ object SurfaceBackdrop {
     }
 
     fun cancel(target: View, keepStaticStyle: Boolean = true) {
+        removePresentedTarget(target)
         val state = states[target] ?: return
         state.generation += 1
         if (keepStaticStyle) {
@@ -219,6 +256,7 @@ object SurfaceBackdrop {
     }
 
     fun clear(target: View) {
+        removePresentedTarget(target)
         val state = states.remove(target) ?: return
         state.generation += 1
         target.background = state.originalBackground
@@ -242,6 +280,117 @@ object SurfaceBackdrop {
             }.also(target::addOnAttachStateChangeListener)
             states[target] = state
         }
+    }
+
+    private fun presentLayer(hostDecor: View, target: View, layerOwner: View) {
+        require(hostDecor.isAttachedToWindow) {
+            "Surface backdrop host must be attached before presentation"
+        }
+        require(target.isAttachedToWindow) {
+            "Surface backdrop target must be attached before presentation"
+        }
+        require(layerOwner.isAttachedToWindow) {
+            "Surface backdrop layer owner must be attached before presentation"
+        }
+        require(target.isSelfOrDescendantOf(layerOwner)) {
+            "Surface backdrop target must belong to its declared layer owner"
+        }
+        require(target.rootView === layerOwner.rootView) {
+            "Surface backdrop target and layer owner must share one window"
+        }
+
+        synchronized(presentedLayers) {
+            removeInvalidPresentedLayers()
+            val existing = presentedLayers[layerOwner]
+            if (existing != null && existing.hostDecor.get() === hostDecor) {
+                existing.targets.removeAll { it.get() == null }
+                if (existing.targets.none { it.get() === target }) {
+                    existing.targets += WeakReference(target)
+                }
+                return
+            }
+            nextPresentationOrder += 1
+            presentedLayers[layerOwner] = PresentedLayer(
+                owner = WeakReference(layerOwner),
+                hostDecor = WeakReference(hostDecor),
+                targets = arrayListOf(WeakReference(target)),
+                order = nextPresentationOrder
+            )
+        }
+    }
+
+    private fun removePresentedTarget(target: View) {
+        synchronized(presentedLayers) {
+            val iterator = presentedLayers.entries.iterator()
+            while (iterator.hasNext()) {
+                val layer = iterator.next().value
+                layer.targets.removeAll { reference ->
+                    val registeredTarget = reference.get()
+                    registeredTarget == null || registeredTarget === target
+                }
+                if (layer.targets.isEmpty()) iterator.remove()
+            }
+        }
+    }
+
+    private fun removeInvalidPresentedLayers() {
+        val iterator = presentedLayers.entries.iterator()
+        while (iterator.hasNext()) {
+            val layer = iterator.next().value
+            val owner = layer.owner.get()
+            val hostDecor = layer.hostDecor.get()
+            layer.targets.removeAll { it.get() == null }
+            if (
+                owner == null || hostDecor == null ||
+                !owner.isAttachedToWindow || !hostDecor.isAttachedToWindow ||
+                layer.targets.isEmpty()
+            ) {
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun captureComposition(hostDecor: View, requesterOwner: View): CaptureComposition {
+        return synchronized(presentedLayers) {
+            removeInvalidPresentedLayers()
+            val requester = requireNotNull(presentedLayers[requesterOwner]) {
+                "Surface backdrop requester has no active presentation layer"
+            }
+            require(requester.hostDecor.get() === hostDecor) {
+                "Surface backdrop requester belongs to a different host window"
+            }
+            val layers = presentedLayers.values.mapNotNull { layer ->
+                val owner = layer.owner.get() ?: return@mapNotNull null
+                val surfaces = layer.targets.mapNotNull { it.get() }.filter {
+                    it.isAttachedToWindow && it.visibility == View.VISIBLE
+                }
+                if (
+                    layer.hostDecor.get() !== hostDecor ||
+                    owner.visibility != View.VISIBLE ||
+                    !owner.isAttachedToWindow ||
+                    surfaces.isEmpty()
+                ) {
+                    return@mapNotNull null
+                }
+                LayerSnapshot(owner, surfaces, layer.order)
+            }.sortedBy { it.order }
+            CaptureComposition(
+                allLayers = layers,
+                sameWindowOwners = layers.mapNotNull { layer ->
+                    layer.owner.takeIf { it.rootView === hostDecor.rootView }
+                },
+                lowerLayers = layers.filter { it.order < requester.order }
+            )
+        }
+    }
+
+    private fun View.isSelfOrDescendantOf(ancestor: View): Boolean {
+        var current: View? = this
+        while (current != null) {
+            if (current === ancestor) return true
+            current = current.parent as? View
+        }
+        return false
     }
 
     private fun installResult(
@@ -311,6 +460,7 @@ object SurfaceBackdrop {
         hostWindow: Window,
         hostDecor: View,
         target: View,
+        layerOwner: View,
         radius: Int,
         generationValid: () -> Boolean,
         attempt: Int,
@@ -325,8 +475,13 @@ object SurfaceBackdrop {
             return
         }
         if (AppConfig.blurExcludeText) {
-            captureTextless(hostDecor, sourceRect, radius, onFinished)
+            capturePaperBackdrop(hostDecor, layerOwner, sourceRect, radius, onFinished)
             return
+        }
+        require(
+            layerOwner.rootView !== hostDecor.rootView || layerOwner.alpha == 0f
+        ) {
+            "Same-window surface owner must be hidden before PixelCopy"
         }
         val sourceBitmap = runCatching {
             Bitmap.createBitmap(sourceRect.width(), sourceRect.height(), Bitmap.Config.ARGB_8888)
@@ -348,6 +503,7 @@ object SurfaceBackdrop {
                         hostWindow,
                         hostDecor,
                         target,
+                        layerOwner,
                         radius,
                         generationValid,
                         attempt + 1,
@@ -367,14 +523,21 @@ object SurfaceBackdrop {
                     if (!generationValid()) sourceBitmap.recycleSafely()
                     return@request
                 }
-                settled = true
                 mainHandler.removeCallbacks(timeoutGuard)
                 if (!generationValid()) {
+                    settled = true
                     sourceBitmap.recycleSafely()
                     onFinished(null)
                     return@request
                 }
                 if (result == PixelCopy.SUCCESS) {
+                    settled = true
+                    drawIndependentLowerLayers(
+                        bitmap = sourceBitmap,
+                        hostDecor = hostDecor,
+                        requesterOwner = layerOwner,
+                        sourceRect = sourceRect
+                    )
                     val blurred = runCatching { blurBitmap(sourceBitmap, radius) }.getOrNull()
                     sourceBitmap.recycleSafely()
                     onFinished(blurred)
@@ -388,9 +551,34 @@ object SurfaceBackdrop {
         }
     }
 
+    /**
+     * 主题面板底图解码。按上限采样控制内存；文件缺失或解码失败返回 null，
+     * 调用方将按无静态底图的默认路径继续（面板图本来就是可选输入）。
+     * 仅在后台线程调用。
+     */
+    private fun decodeStaticBackdrop(path: String): Bitmap? {
+        val file = File(path)
+        if (!file.isFile) return null
+        return runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+            var sampleSize = 1
+            while (
+                bounds.outWidth / (sampleSize * 2) >= PANEL_BACKDROP_MAX_DIMENSION &&
+                bounds.outHeight / (sampleSize * 2) >= PANEL_BACKDROP_MAX_DIMENSION
+            ) {
+                sampleSize *= 2
+            }
+            BitmapFactory.decodeFile(
+                file.absolutePath,
+                BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            )
+        }.getOrNull()
+    }
+
     /** PixelCopy 的矩形始终使用源 Window 坐标。 */
-    private fun sourceRect(hostDecor: View, target: View): Rect? {
-        if (hostDecor.width <= 0 || hostDecor.height <= 0) return null
+    private fun sourceRect(hostDecor: View, target: View): Rect? {        if (hostDecor.width <= 0 || hostDecor.height <= 0) return null
         val targetLocation = IntArray(2)
         val hostLocation = IntArray(2)
         val rawLeft: Int
@@ -425,11 +613,14 @@ object SurfaceBackdrop {
     }
 
     /**
-     * 开关开启时的离屏无文字采集：直接按模糊采样率渲染宿主窗口（不含文字），
-     * 只缩一次，模糊后放大回目标尺寸。主线程同步完成，不影响真实帧。
+     * 开关开启时的纸面采集：先移除宿主窗口中的全部已登记浮层，再按展示顺序
+     * 只叠画请求层以下的玻璃表面，不重绘这些浮层的控件树。请求层自身与其上方内容
+     * 不会进入模糊源。
+     * 主线程同步完成，不影响真实帧。
      */
-    private fun captureTextless(
+    private fun capturePaperBackdrop(
         hostDecor: View,
+        requesterOwner: View,
         sourceRect: Rect,
         radius: Int,
         onFinished: (Bitmap?) -> Unit
@@ -442,12 +633,34 @@ object SurfaceBackdrop {
             onFinished(null)
             return
         }
+        val hostOrigin = IntArray(2)
+        hostDecor.getLocationOnScreen(hostOrigin)
+        val composition = captureComposition(hostDecor, requesterOwner)
+        val excludedHostContent = synchronized(paperContentRoots) {
+            paperContentRoots.keys.filter {
+                it.isAttachedToWindow && it.rootView === hostDecor.rootView
+            }
+        }
         val blurred = runCatching {
             val canvas = Canvas(sampled)
             val scale = 1f / SURFACE_BLUR_SAMPLE
             canvas.scale(scale, scale)
             canvas.translate(-sourceRect.left.toFloat(), -sourceRect.top.toFloat())
-            drawTextlessWindow(hostDecor, canvas)
+            drawWindow(
+                view = hostDecor,
+                canvas = canvas,
+                suppressText = true,
+                excludedOwners = (composition.sameWindowOwners + excludedHostContent).toSet()
+            )
+            composition.lowerLayers.forEach { layer ->
+                drawPresentedLayer(
+                    layer = layer,
+                    allLayers = composition.allLayers,
+                    hostOrigin = hostOrigin,
+                    canvas = canvas,
+                    surfaceOnly = true
+                )
+            }
             blurSampled(sampled, radius, sourceRect.width(), sourceRect.height())
         }.getOrNull()
         sampled.recycleSafely()
@@ -455,33 +668,129 @@ object SurfaceBackdrop {
     }
 
     /**
-     * 离屏渲染宿主窗口且不包含文字：临时隐藏窗口内全部 TextView，
-     * 并让阅读页等自绘文字路径经 [BackdropRenderState] 跳过文字绘制。
+     * 离屏渲染窗口：按采集模式临时隐藏文字，并让阅读页等自绘内容路径经
+     * [BackdropRenderState] 只绘制纸面；明确传入的其他逻辑浮层 owner 同步排除。
      * 全程同步执行并在返回前恢复，真实帧不受影响。
      */
-    private fun drawTextlessWindow(decor: View, canvas: Canvas) {
-        val hidden = ArrayList<Pair<TextView, Int>>()
-        collectTextViews(decor, hidden)
+    private fun drawWindow(
+        view: View,
+        canvas: Canvas,
+        suppressText: Boolean,
+        excludedOwners: Set<View> = emptySet()
+    ) {
+        val hidden = ArrayList<Pair<View, Int>>()
+        collectBackdropHiddenViews(view, suppressText, excludedOwners, hidden)
         hidden.forEach { (view, _) -> view.visibility = View.INVISIBLE }
         try {
-            BackdropRenderState.withTextSuppressed {
-                decor.draw(canvas)
+            if (suppressText) {
+                BackdropRenderState.withTextSuppressed {
+                    view.draw(canvas)
+                }
+            } else {
+                view.draw(canvas)
             }
         } finally {
             hidden.forEach { (view, visibility) -> view.visibility = visibility }
         }
     }
 
-    private fun collectTextViews(view: View, out: ArrayList<Pair<TextView, Int>>) {
+    private fun collectBackdropHiddenViews(
+        view: View,
+        suppressText: Boolean,
+        excludedOwners: Set<View>,
+        out: ArrayList<Pair<View, Int>>
+    ) {
         if (view.visibility != View.VISIBLE) return
-        if (view is TextView) {
+        if (view in excludedOwners || suppressText && view is TextView) {
             out.add(view to view.visibility)
             return
         }
         if (view is ViewGroup) {
             for (index in 0 until view.childCount) {
-                collectTextViews(view.getChildAt(index), out)
+                collectBackdropHiddenViews(
+                    view.getChildAt(index),
+                    suppressText,
+                    excludedOwners,
+                    out
+                )
             }
+        }
+    }
+
+    private fun drawPresentedLayer(
+        layer: LayerSnapshot,
+        allLayers: List<LayerSnapshot>,
+        hostOrigin: IntArray,
+        canvas: Canvas,
+        surfaceOnly: Boolean
+    ) {
+        if (surfaceOnly) {
+            layer.surfaces.forEach { surface ->
+                drawSurfaceBackground(surface, hostOrigin, canvas)
+            }
+            return
+        }
+        val owner = layer.owner
+        val nestedOwners = allLayers.mapNotNull { other ->
+            other.owner.takeIf {
+                it !== owner && it.isSelfOrDescendantOf(owner)
+            }
+        }.toSet()
+        val location = IntArray(2)
+        owner.getLocationOnScreen(location)
+        canvas.save()
+        canvas.translate(
+            (location[0] - hostOrigin[0]).toFloat(),
+            (location[1] - hostOrigin[1]).toFloat()
+        )
+        drawWindow(
+            view = owner,
+            canvas = canvas,
+            suppressText = false,
+            excludedOwners = nestedOwners
+        )
+        canvas.restore()
+    }
+
+    private fun drawSurfaceBackground(surface: View, hostOrigin: IntArray, canvas: Canvas) {
+        val background = surface.background
+        require(background is SurfaceDrawable) {
+            "Presented surface target must own a SurfaceDrawable"
+        }
+        val location = IntArray(2)
+        surface.getLocationOnScreen(location)
+        canvas.save()
+        canvas.translate(
+            (location[0] - hostOrigin[0]).toFloat(),
+            (location[1] - hostOrigin[1]).toFloat()
+        )
+        background.draw(canvas)
+        canvas.restore()
+    }
+
+    private fun drawIndependentLowerLayers(
+        bitmap: Bitmap,
+        hostDecor: View,
+        requesterOwner: View,
+        sourceRect: Rect
+    ) {
+        val composition = captureComposition(hostDecor, requesterOwner)
+        val independentLayers = composition.lowerLayers.filter {
+            it.owner.rootView !== hostDecor.rootView
+        }
+        if (independentLayers.isEmpty()) return
+        val hostOrigin = IntArray(2)
+        hostDecor.getLocationOnScreen(hostOrigin)
+        val canvas = Canvas(bitmap)
+        canvas.translate(-sourceRect.left.toFloat(), -sourceRect.top.toFloat())
+        independentLayers.forEach { layer ->
+            drawPresentedLayer(
+                layer = layer,
+                allLayers = composition.allLayers,
+                hostOrigin = hostOrigin,
+                canvas = canvas,
+                surfaceOnly = false
+            )
         }
     }
 

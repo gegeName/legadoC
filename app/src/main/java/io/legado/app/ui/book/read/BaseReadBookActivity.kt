@@ -41,6 +41,7 @@ import io.legado.app.ui.book.read.config.PageKeyDialog
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.utils.ColorUtils
 import io.legado.app.utils.FileDoc
+import io.legado.app.utils.SurfaceBackdrop
 import io.legado.app.utils.find
 import io.legado.app.utils.getPrefString
 import io.legado.app.utils.gone
@@ -89,6 +90,8 @@ abstract class BaseReadBookActivity :
         setOrientation()
         upLayoutInDisplayCutoutMode()
         super.onCreate(savedInstanceState)
+        SurfaceBackdrop.excludeFromPaperCapture(binding.readAloudPagePanel)
+        SurfaceBackdrop.excludeFromPaperCapture(binding.readAloudPlaybackPanel)
         binding.navigationBar.setOnApplyWindowInsetsListenerCompat { view, windowInsets ->
             val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
             view.updateLayoutParams {

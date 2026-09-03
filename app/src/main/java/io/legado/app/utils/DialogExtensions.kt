@@ -286,7 +286,11 @@ fun Dialog.applyDialogSurfaceBlur(
     // hosts such as OnLineImportActivity this left the import sheet invisible,
     // so the first tap dismissed it and finishOnDismiss finished the activity.
     val hostTranslucent = context.isTranslucentActivity()
-    if (style.blurRadiusPx <= 0 || hostWindow == null || hostTranslucent) {
+    if (hostWindow == null) {
+        revealWindow()
+        return
+    }
+    if (hostTranslucent) {
         revealWindow()
         return
     }
@@ -294,6 +298,7 @@ fun Dialog.applyDialogSurfaceBlur(
         hostWindow = hostWindow,
         target = target,
         style = style,
+        layerOwner = dialogWindow.decorView,
         onReady = {}
     )
 }

@@ -8,7 +8,6 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import androidx.core.content.ContextCompat
 import androidx.core.graphics.toColorInt
 import androidx.core.view.updateLayoutParams
 import androidx.lifecycle.lifecycleScope
@@ -30,6 +29,7 @@ import io.legado.app.databinding.ItemThemePackageBinding
 import io.legado.app.constant.EventBus
 import io.legado.app.constant.PreferKey
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.config.AppearanceKitManager
 import io.legado.app.help.config.ThemeConfig
 import io.legado.app.help.config.ThemePackageManager
 import io.legado.app.help.glide.ImageLoader
@@ -173,19 +173,19 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
 
     private fun initView() = binding.run {
         tabBar.background = UiCorner.rounded(
-            ContextCompat.getColor(this@ThemeManageActivity, R.color.background_menu),
+            UiCorner.themeSurfaceMutedColor(this@ThemeManageActivity),
             UiCorner.panelRadius(this@ThemeManageActivity)
         )
         listOf(btnDay, btnNight).forEach {
             it.background = UiCorner.softActionSelector(
                 Color.TRANSPARENT,
-                ContextCompat.getColor(this@ThemeManageActivity, R.color.background_card),
+                UiCorner.themeSurfaceCardColor(this@ThemeManageActivity),
                 UiCorner.actionRadius(this@ThemeManageActivity)
             )
         }
         btnAdd.background = UiCorner.softActionSelector(
             Color.TRANSPARENT,
-            ContextCompat.getColor(this@ThemeManageActivity, R.color.background_card),
+            UiCorner.themeSurfaceCardColor(this@ThemeManageActivity),
             UiCorner.actionRadius(this@ThemeManageActivity)
         )
         recyclerView.layoutManager = LinearLayoutManager(this@ThemeManageActivity)
@@ -387,7 +387,7 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
 
     private fun setupThemeEditTabs(binding: DialogThemePackageEditBinding) = binding.run {
         tabEditBar.background = UiCorner.rounded(
-            ContextCompat.getColor(this@ThemeManageActivity, R.color.background_menu),
+            UiCorner.themeSurfaceMutedColor(this@ThemeManageActivity),
             UiCorner.panelRadius(this@ThemeManageActivity)
         )
         listOf(
@@ -412,7 +412,7 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
         llImageGroup.visibility = if (tab == ThemeEditTab.IMAGE) View.VISIBLE else View.GONE
         llInterfaceGroup.visibility = if (tab == ThemeEditTab.INTERFACE) View.VISIBLE else View.GONE
         llFontGroup.visibility = if (tab == ThemeEditTab.FONT) View.VISIBLE else View.GONE
-        val selectedBackground = ContextCompat.getColor(this@ThemeManageActivity, R.color.background_card)
+        val selectedBackground = UiCorner.themeSurfaceCardColor(this@ThemeManageActivity)
         listOf(
             btnTabColor to ThemeEditTab.COLOR,
             btnTabImage to ThemeEditTab.IMAGE,
@@ -988,11 +988,9 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
             if (entry.source != ThemePackageManager.Source.REMOTE) add(ThemeAction.EXPORT)
             if (entry.source != ThemePackageManager.Source.LOCAL) add(ThemeAction.DOWNLOAD)
             if (entry.source != ThemePackageManager.Source.REMOTE) add(ThemeAction.UPLOAD)
-            if (!isApplied(entry)) {
-                if (entry.source != ThemePackageManager.Source.REMOTE) add(ThemeAction.DELETE_LOCAL)
-                if (entry.source != ThemePackageManager.Source.LOCAL) add(ThemeAction.DELETE_REMOTE)
-                if (entry.source == ThemePackageManager.Source.BOTH) add(ThemeAction.DELETE_BOTH)
-            }
+            if (entry.source != ThemePackageManager.Source.REMOTE) add(ThemeAction.DELETE_LOCAL)
+            if (entry.source != ThemePackageManager.Source.LOCAL) add(ThemeAction.DELETE_REMOTE)
+            if (entry.source == ThemePackageManager.Source.BOTH) add(ThemeAction.DELETE_BOTH)
         }
         selector(entry.packageInfo.name, actions.map { getString(it.titleRes) }) { _, index ->
             when (actions[index]) {
@@ -1004,18 +1002,41 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
                     enqueueUploadIfNeeded(entry)
                     toastOnUi(getString(R.string.theme_sync_queued))
                 }
-                ThemeAction.DELETE_LOCAL -> confirmDeleteTheme(entry, getString(R.string.theme_delete_local_confirm)) {
+                ThemeAction.DELETE_LOCAL -> confirmDelete(deleteConfirmMessage(entry, R.string.theme_delete_local_confirm)) {
                     ThemePackageManager.deleteLocal(entry)
+                    resetAppliedThemeDefault(entry)
                 }
-                ThemeAction.DELETE_REMOTE -> confirmDeleteTheme(entry, getString(R.string.theme_delete_remote_confirm)) {
+                ThemeAction.DELETE_REMOTE -> confirmDelete(getString(R.string.theme_delete_remote_confirm)) {
                     enqueueRemoteDelete(entry)
                 }
-                ThemeAction.DELETE_BOTH -> confirmDeleteTheme(entry, getString(R.string.theme_delete_both_confirm)) {
+                ThemeAction.DELETE_BOTH -> confirmDelete(deleteConfirmMessage(entry, R.string.theme_delete_both_confirm)) {
                     ThemePackageManager.deleteLocal(entry)
                     enqueueRemoteDelete(entry)
+                    resetAppliedThemeDefault(entry)
                 }
             }
         }
+    }
+
+    private fun deleteConfirmMessage(
+        entry: ThemePackageManager.Entry,
+        baseRes: Int
+    ): String {
+        return if (isApplied(entry)) {
+            getString(R.string.theme_delete_applied_confirm)
+        } else {
+            getString(baseRes)
+        }
+    }
+
+    private fun resetAppliedThemeDefault(entry: ThemePackageManager.Entry) {
+        if (!isApplied(entry)) return
+        ThemeConfig.delConfig(entry.packageInfo.name)
+        ThemeConfig.applyConfig(
+            this@ThemeManageActivity,
+            ThemeConfig.defaultConfig(this@ThemeManageActivity, entry.packageInfo.isNightTheme),
+            switchNightMode = false
+        )
     }
 
     private fun exportThemeZip(entry: ThemePackageManager.Entry) {
@@ -1047,11 +1068,21 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
                 contentResolver.openInputStream(uri)?.use { input ->
                     FileOutputStream(file).use { output -> input.copyTo(output) }
                 } ?: throw IllegalArgumentException(getString(R.string.theme_zip_read_failed))
-                ThemePackageManager.importZip(file)
-            }.onSuccess {
-                toastOnUi(getString(R.string.theme_imported))
+                if (AppearanceKitManager.isKitPackage(file)) {
+                    AppearanceKitManager.importPackage(file)
+                } else {
+                    ThemePackageManager.importZip(file).also {
+                        enqueueUploadIfNeeded(it)
+                    }
+                    null
+                }
+            }.onSuccess { summary ->
+                if (summary == null) {
+                    toastOnUi(getString(R.string.theme_imported))
+                } else {
+                    toastOnUi(getString(R.string.appearance_kit_imported, summary.kitName))
+                }
                 loadThemes()
-                enqueueUploadIfNeeded(it)
             }.onFailure {
                 if (it.isJobCancellation()) return@onFailure
                 toastOnUi(getString(R.string.theme_import_failed, it.localizedMessage))
@@ -1213,18 +1244,6 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
         }
     }
 
-    private fun confirmDeleteTheme(
-        entry: ThemePackageManager.Entry,
-        message: String,
-        block: suspend () -> Unit
-    ) {
-        if (isApplied(entry)) {
-            toastOnUi(getString(R.string.theme_delete_applied_forbidden))
-            return
-        }
-        confirmDelete(message, block)
-    }
-
     private inner class Adapter : RecyclerView.Adapter<Adapter.Holder>() {
 
         var items: List<ThemePackageManager.Entry> = emptyList()
@@ -1283,7 +1302,7 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
             fun bind(entry: ThemePackageManager.Entry) = itemBinding.run {
                 val pkg = entry.packageInfo
                 root.background = UiCorner.rounded(
-                    ContextCompat.getColor(this@ThemeManageActivity, R.color.background_card),
+                    UiCorner.themeSurfaceCardColor(this@ThemeManageActivity),
                     UiCorner.panelRadius(this@ThemeManageActivity)
                 )
                 cardPreview.radius = UiCorner.panelRadius(this@ThemeManageActivity)
@@ -1305,7 +1324,7 @@ class ThemeManageActivity : BaseActivity<ActivityThemeManageBinding>(),
                 listOf(btnApply, btnEdit, btnMore).forEach {
                     it.background = UiCorner.softActionSelector(
                         Color.TRANSPARENT,
-                        ContextCompat.getColor(this@ThemeManageActivity, R.color.background_menu),
+                        UiCorner.themeSurfaceMutedColor(this@ThemeManageActivity),
                         UiCorner.actionRadius(this@ThemeManageActivity)
                     )
                 }
