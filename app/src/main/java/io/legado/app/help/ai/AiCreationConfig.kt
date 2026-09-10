@@ -1,16 +1,20 @@
 package io.legado.app.help.ai
 
+import io.legado.app.R
+import io.legado.app.constant.AppLog
 import io.legado.app.constant.PreferKey
 import io.legado.app.help.config.AppConfig
 import io.legado.app.ui.main.ai.AiModelConfig
 import io.legado.app.ui.main.ai.AiProviderConfig
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.getPrefInt
+import io.legado.app.utils.getPrefLong
 import io.legado.app.utils.getPrefString
 import io.legado.app.utils.putPrefBoolean
 import io.legado.app.utils.putPrefInt
 import io.legado.app.utils.putPrefString
 import io.legado.app.utils.removePref
+import io.legado.app.utils.toastOnUi
 import org.json.JSONObject
 import splitties.init.appCtx
 
@@ -24,6 +28,10 @@ object AiCreationConfig {
     const val DEFAULT_IMAGE_RETRY_COUNT = 3
     const val MIN_IMAGE_RETRY_COUNT = 0
     const val MAX_IMAGE_RETRY_COUNT = 10
+
+    const val DEFAULT_PROMPT_REGENERATE_LIMIT = 3
+    const val MIN_PROMPT_REGENERATE_LIMIT = 0
+    const val MAX_PROMPT_REGENERATE_LIMIT = 10
 
     const val SECTION_SELECTED_TEXT = "selected_text"
     const val SECTION_BACKGROUND = "background"
@@ -66,6 +74,8 @@ object AiCreationConfig {
                 "单镜头",
                 "一个连续镜头，涵盖主体、动作、环境与运镜。"
             )
+            //有图时路由追加：校验要求模型保留标记，规则必须先告诉模型，不能只在代码里校验
+            put(AiCreationVariables.MARKER_RULE_PROMPT, AiCreationVariables.MARKER_RULE_TEXT)
         }.toString()
     }
 
@@ -102,66 +112,215 @@ object AiCreationConfig {
         }
 
     /**
-     * 图片变量定义完全来自当前图片供应商的 JSON。
+     * 全局 LLM 变量设置：控制发给 LLM 的内容（style 变量、提示词路由、LLM 输入模板），
+     * 与图片/视频供应商无关；供应商变量定义只含生图/生视频参数。
      */
-    val imageDefinition: AiCreationDefinition
-        get() = parseImageDefinition(AiCreationProviderStore.requireImageVariablesJson())
+    val defaultLlmVariablesJson: String by lazy { AiCreationVariables.buildLlmDefaultJson() }
 
-    /**
-     * 视频变量定义完全来自当前视频供应商的 JSON。
-     */
-    val videoDefinition: AiCreationDefinition
-        get() = parseVideoDefinition(AiCreationProviderStore.requireVideoVariablesJson())
+    var llmVariablesJson: String
+        get() = appCtx.getPrefString(PreferKey.aiCreationLlmVariables)
+            ?: defaultLlmVariablesJson
+        set(value) {
+            val normalized = value.trim()
+            AiCreationVariables.parseLlm(normalized)
+            appCtx.putPrefString(PreferKey.aiCreationLlmVariables, normalized)
+        }
 
-    fun parseImageDefinition(json: String): AiCreationDefinition =
-        requireStyleDefinition(
-            definition = AiCreationVariables.parse(json),
-            label = "图片",
-            options = listOf("连环画", "单场景"),
-            defaultValue = "单场景"
-        )
+    /** 图片体系的 LLM 变量定义（LLM 变量设置 image 节）。 */
+    val imageLlmDefinition: AiCreationDefinition
+        get() = AiCreationVariables.parseLlm(llmVariablesJson).image
+            ?: error("LLM 变量设置缺少 image 节")
 
-    fun parseVideoDefinition(json: String): AiCreationDefinition =
-        requireStyleDefinition(
-            definition = AiCreationVariables.parse(json),
-            label = "视频",
-            options = listOf("多镜头", "单镜头"),
-            defaultValue = "单镜头"
-        )
+    /** 视频体系的 LLM 变量定义（LLM 变量设置 video 节）。 */
+    val videoLlmDefinition: AiCreationDefinition
+        get() = AiCreationVariables.parseLlm(llmVariablesJson).video
+            ?: error("LLM 变量设置缺少 video 节")
 
-    private fun requireStyleDefinition(
-        definition: AiCreationDefinition,
-        label: String,
-        options: List<String>,
-        defaultValue: String
-    ): AiCreationDefinition {
-        val style = definition.variables.singleOrNull { it.key == "style" }
-            ?: throw IllegalStateException("${label}变量定义必须且只能有一个 style")
-        require(style.format == AiCreationVariable.FORMAT_OPTIONS) {
-            "${label} style 必须是选项式变量"
-        }
-        require(style.options == options && style.effectiveValues() == options) {
-            "${label} style 选项必须是：${options.joinToString("、")}"
-        }
-        require(style.defaultValue == defaultValue) {
-            "${label} style 默认值必须是：${defaultValue}"
-        }
-        options.forEach { styleValue ->
-            val matches = definition.routes.filter { route ->
-                route.conditions == mapOf("style" to styleValue)
-            }
-            require(matches.size == 1) {
-                "${label}变量定义缺少 style=${styleValue} 的提示词路由"
-            }
-        }
-        require(definition.routes.size == options.size) {
-            "${label}变量定义的提示词路由只能由 style 决定"
-        }
-        return definition
-    }
+    /** 当前图片供应商的生图参数变量（旧格式残留自动回出厂）。 */
+    val imageVariables: List<AiCreationVariable>
+        get() = AiCreationProviderStore.parsedImageVariables()
+
+    /** 当前视频供应商的生视频参数变量（旧格式残留自动回出厂）。 */
+    val videoVariables: List<AiCreationVariable>
+        get() = AiCreationProviderStore.parsedVideoVariables()
 
     val promptTemplates: Map<String, String>
         get() = parsePromptTemplates(promptTemplateJson)
+
+    /**
+     * 强升级：AI 全部 JSON 配置回到出厂（内置图片/视频供应商的变量定义与请求模板、
+     * 全局 LLM 变量设置、提示词模板、全局通用请求模板、分镜/选角/净化请求模板）。
+     * 只保留身份与连线信息：供应商 id、名字、地址、钥匙、自定义请求头、模型列表与当前选择；
+     * 自定义供应商一律不动。调用方只在版本戳升级时调一次，平时不碰用户配置。
+     */
+    fun forceRestoreFactoryDefaults() {
+        AiCreationProviderStore.restoreBuiltinToFactory()
+        llmVariablesJson = defaultLlmVariablesJson
+        promptTemplateJson = defaultPromptTemplateJson
+        AiStructuredRequestTemplate.global = AiStructuredRequestTemplate.default
+        AiStoryboardConfig.storyboardRequestTemplate = AiStructuredRequestTemplate.structuredDefault
+        AiStoryboardConfig.castingRequestTemplate = AiStructuredRequestTemplate.structuredDefault
+        AiChapterPurifyConfig.requestTemplate = AiStructuredRequestTemplate.structuredDefault
+        AppLog.putAi(
+            "AI_CREATION CONFIG FORCE RESTORED\n" +
+                "scope=providerVariables,requestTemplate,llmVariables,promptTemplate,globalRequestTemplate,storyboardRequestTemplate,castingRequestTemplate,purifyRequestTemplate\n" +
+                "kept=providerId,name,baseUrl,apiKey,headers,models,currentSelection"
+        )
+    }
+
+    /**
+     * 破坏性更新硬开关：true 表示本版本有破坏性更新，升级时不检测、
+     * 直接把 AI 下面所有 JSON 配置全部炸回出厂（自加的供应商整家删除）。
+     * 没有破坏性更新的版本把它置 false，升级时只把内置回出厂，自加的不动。
+     */
+    const val NUKE_CUSTOM_AI_CONFIG_ON_UPGRADE = true
+
+    /**
+     * 版本号一变就按开关处理，不另维护升级号：完整比对版本名加版本号，
+     * 有一个不一样就算变（同号不同时间戳的包也能分出来）。
+     * 两个记号都没有=新装，只记号不炸不弹；
+     * 记号跟当前不一样=升级上来了，开关开着直接全炸，关着只把内置回出厂。
+     * 老版本记的是纯数字旧记号，先读它再删，读不到才算新装；
+     * 之前先删后读，把老用户全当成了新装，这是 bug，已改。
+     * 每次启动都跑，便宜的几次读值比对。
+     */
+    fun nukeOnAppVersionChange() {
+        val currentTag = runCatching { appVersionTag() }.getOrNull() ?: return
+        val currentCode = currentTag.substringAfterLast('|', "").toLongOrNull()
+        val lastTag = appCtx.getPrefString(PreferKey.aiNukeAppVersion, "").orEmpty()
+        //老记号（纯数字版本号）：先读出来比对，再删，不跟新记号打架
+        val legacyCode = appCtx.getPrefLong("aiNukeVersionCode", 0L)
+        appCtx.removePref("aiNukeVersionCode")
+        if (lastTag.isBlank() && legacyCode == 0L) {
+            appCtx.putPrefString(PreferKey.aiNukeAppVersion, currentTag)
+            return
+        }
+        val changed = if (lastTag.isNotBlank()) {
+            lastTag != currentTag
+        } else {
+            currentCode == null || legacyCode != currentCode
+        }
+        if (!changed) {
+            //记号对上了只是格式老，把新记号对齐，不炸
+            appCtx.putPrefString(PreferKey.aiNukeAppVersion, currentTag)
+            return
+        }
+        if (NUKE_CUSTOM_AI_CONFIG_ON_UPGRADE) {
+            nukeAllAiJsonConfigs()
+        } else {
+            forceRestoreFactoryDefaults()
+        }
+        sanitizeStoredJsons()
+        AiStructuredRequestTemplate.migrateTemplateOwnership()
+        appCtx.putPrefString(PreferKey.aiNukeAppVersion, currentTag)
+    }
+
+    private fun appVersionTag(): String {
+        val info = appCtx.packageManager.getPackageInfo(appCtx.packageName, 0)
+        val code = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+        return "${info.versionName.orEmpty()}|$code"
+    }
+
+    /**
+     * 炸：AI 下面所有 JSON 配置全部回到出厂。
+     * 名单删了下次读自动重种内置；自加的供应商整家消失（模型连带清掉）；
+     * 钥匙名字地址跟着自加行一起走，认了。只在版本升级时调一次。
+     */
+    fun nukeAllAiJsonConfigs() {
+        appCtx.removePref(PreferKey.aiCreationImageProviderList)
+        appCtx.removePref(PreferKey.aiCreationImageModelList)
+        appCtx.removePref(PreferKey.aiCreationVideoProviderList)
+        appCtx.removePref(PreferKey.aiCreationVideoModelList)
+        appCtx.removePref(PreferKey.aiProviderList)
+        appCtx.removePref(PreferKey.aiModelConfigList)
+        appCtx.putPrefBoolean(PreferKey.aiDefaultConfigSeeded, false)
+        saveCreationParams(emptyMap())
+        forceRestoreFactoryDefaults()
+        val summary = "本版本含破坏性更新，AI配置已全部恢复出厂，自加供应商已删除"
+        AppLog.putAi("AI_CONFIG NUKED\n$summary")
+        appCtx.toastOnUi(summary)
+    }
+
+    /**
+     * 安装/升级后一次性消毒：存量 LLM 变量设置与提示词模板非法时用出厂值覆盖，
+     * 并响亮告知恢复了哪几项；版本戳由调用方（DefaultData）打标，此后用户手写
+     * 错误只报错、不再碰存储。供应商变量定义不在此列：旧格式残留已在读取时
+     * 自愈，其他错误本就是用户自己的问题，原样报错。
+     */
+    fun sanitizeStoredJsons() {
+        val restored = mutableListOf<String>()
+        runCatching { AiCreationVariables.parseLlm(llmVariablesJson) }.onFailure {
+            llmVariablesJson = defaultLlmVariablesJson
+            restored.add(appCtx.getString(R.string.ai_creation_llm_variables))
+        }
+        runCatching { parsePromptTemplates(promptTemplateJson) }.onFailure {
+            promptTemplateJson = defaultPromptTemplateJson
+            restored.add(appCtx.getString(R.string.ai_creation_prompt_template))
+        }
+        sanitizeCreationParamValues()
+        if (restored.isNotEmpty()) {
+            AppLog.putAi(
+                "AI_CREATION CONFIG SANITIZED\n" +
+                    "restored=${restored.joinToString("、")}"
+            )
+            appCtx.toastOnUi(
+                appCtx.getString(
+                    R.string.ai_creation_config_sanitized,
+                    restored.joinToString("、")
+                )
+            )
+        }
+    }
+
+    /**
+     * 存量参数值全量消毒：按当前变量定义检查参数记忆里的所有已存值，
+     * 取值与当前定义不符（选项/开关变更、跨体系残留）的直接重置为定义默认值。
+     * 覆盖 LLM 变量与全部供应商（含非当前）的参数键；
+     * 某个定义本身读不出来时跳过该组，错误由读取路径按既有规则报。
+     */
+    private fun sanitizeCreationParamValues() {
+        val params = loadCreationParams()
+        val groups = mutableListOf<Pair<String, List<AiCreationVariable>>>()
+        runCatching { imageLlmDefinition }.onSuccess {
+            groups.add("llm:image" to it.variables)
+        }
+        runCatching { videoLlmDefinition }.onSuccess {
+            groups.add("llm:video" to it.variables)
+        }
+        AiCreationProviderStore.imageProviderList.forEach { provider ->
+            runCatching { AiCreationVariables.parse(provider.variablesJson) }.onSuccess {
+                groups.add("provider:image:${provider.id}" to it)
+            }
+        }
+        AiCreationProviderStore.videoProviderList.forEach { provider ->
+            runCatching { AiCreationVariables.parse(provider.variablesJson) }.onSuccess {
+                groups.add("provider:video:${provider.id}" to it)
+            }
+        }
+        var changed = false
+        groups.forEach { (prefix, variables) ->
+            variables.forEach { variable ->
+                if (variable.format == AiCreationVariable.FORMAT_INPUT) return@forEach
+                val key = "$prefix:${variable.key}"
+                val stored = params[key] ?: return@forEach
+                if (!variable.accepts(stored)) {
+                    params[key] = variable.defaultValue
+                    changed = true
+                    AppLog.putAi(
+                        "AI_CREATION PARAM RESET\nkey=$key value=$stored -> ${variable.defaultValue}"
+                    )
+                }
+            }
+        }
+        if (changed) {
+            saveCreationParams(params)
+        }
+    }
 
     fun parsePromptTemplates(json: String): Map<String, String> {
         val objectValue = try {
@@ -221,6 +380,20 @@ object AiCreationConfig {
         set(value) = appCtx.putPrefInt(
             PreferKey.aiCreationImageRetryCount,
             value.coerceIn(MIN_IMAGE_RETRY_COUNT, MAX_IMAGE_RETRY_COUNT)
+        )
+
+    /**
+     * 提示词重新生成上限：LLM 返回的标记校验不通过时允许的额外重发次数，
+     * 0 表示不重新生成，校验失败直接报错。
+     */
+    var promptRegenerateLimit: Int
+        get() = appCtx.getPrefInt(
+            PreferKey.aiCreationPromptRegenerateLimit,
+            DEFAULT_PROMPT_REGENERATE_LIMIT
+        ).coerceIn(MIN_PROMPT_REGENERATE_LIMIT, MAX_PROMPT_REGENERATE_LIMIT)
+        set(value) = appCtx.putPrefInt(
+            PreferKey.aiCreationPromptRegenerateLimit,
+            value.coerceIn(MIN_PROMPT_REGENERATE_LIMIT, MAX_PROMPT_REGENERATE_LIMIT)
         )
 
     fun requireModelTarget(): AiCreationModelTarget {

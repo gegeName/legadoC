@@ -103,12 +103,73 @@
         </ScrollView>
 
         <LinearLayout
-            android:id="@+id/ll_prompt_page"
+            android:id="@+id/ll_manual_page"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:orientation="vertical"
             android:padding="16dp"
             android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/ai_creation_llm_input_hint"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_save_llm_images"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="8dp"
+                    android:text="@string/ai_creation_save_images"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_clear_llm_input"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="8dp"
+                    android:text="@string/ai_creation_clear"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_copy_llm_input"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="8dp"
+                    android:text="@string/ai_creation_copy"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
+
+            <!--上框图片条：只显示编号圈不放缩略图，点编号预览原图，×删图并由程序重排标记-->
+            <HorizontalScrollView
+                android:id="@+id/hs_llm_images"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/ll_llm_image_strip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp" />
+
+            </HorizontalScrollView>
 
             <ScrollView
                 android:layout_width="match_parent"
@@ -116,23 +177,65 @@
                 android:layout_weight="1">
 
                 <EditText
-                    android:id="@+id/et_prompt"
+                    android:id="@+id/et_llm_input"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:background="@null"
                     android:gravity="top"
-                    android:hint="@string/ai_creation_prompt_hint"
-                    android:minHeight="200dp"
+                    android:minHeight="120dp"
                     android:textSize="14sp" />
 
             </ScrollView>
 
-            <io.legado.app.ui.widget.anima.RotateLoading
-                android:id="@+id/rotate_loading"
+            <View
                 android:layout_width="match_parent"
-                android:layout_height="4dp"
+                android:layout_height="1dp"
                 android:layout_marginTop="8dp"
-                android:visibility="gone" />
+                android:layout_marginBottom="8dp"
+                android:background="#33808080" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/ai_creation_manual_prompt_hint"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_clear_prompt"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="8dp"
+                    android:text="@string/ai_creation_clear"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_copy_prompt"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="8dp"
+                    android:text="@string/ai_creation_copy"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
+
+            <EditText
+                android:id="@+id/et_manual_prompt"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:background="@null"
+                android:gravity="top"
+                android:textSize="14sp" />
 
         </LinearLayout>
 
@@ -215,6 +318,14 @@
 
     </FrameLayout>
 
+    <!--跨页共享生成加载条：位于内容区与底部栏之间，提示词页视觉位置与原先一致-->
+    <io.legado.app.ui.widget.anima.RotateLoading
+        android:id="@+id/rotate_loading"
+        android:layout_width="match_parent"
+        android:layout_height="4dp"
+        android:layout_marginTop="8dp"
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/bottom_bar"
         android:layout_width="match_parent"
@@ -236,12 +347,27 @@
             tools:ignore="RtlHardcoded" />
 
         <io.legado.app.ui.widget.text.AccentTextView
+            android:id="@+id/tv_manual"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:text="@string/ai_creation_prompt_title"
+            tools:ignore="RtlHardcoded" />
+
+        <io.legado.app.ui.widget.text.AccentTextView
             android:id="@+id/tv_action"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:padding="12dp"
             android:text="@string/ai_creation_next"
             tools:ignore="RtlHardcoded" />
+
+        <Space
+            android:id="@+id/bottom_spacer"
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1"
+            android:visibility="gone" />
 
         <TextView
             android:id="@+id/btn_generate_image"
@@ -262,6 +388,7 @@
             android:id="@+id/et_image_count"
             android:layout_width="56dp"
             android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
             android:gravity="center"
             android:hint="@string/ai_creation_image_count_hint"
             android:inputType="number"

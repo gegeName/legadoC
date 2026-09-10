@@ -18,46 +18,47 @@
         <item name="android:windowBackground">@android:color/transparent</item>
     </style>
 
-    <!-- System splash themes -->
+    <!-- System splash themes（欢迎页启动屏图标：必须引用 @drawable/splash_icon* inset 包装，禁止直接引用 @mipmap；
+         inset 数值由 AOSP 管线公式推导——默认 96dp / drawable-v31 54dp，禁止改动或删除 v31 变体，b00bd65e 已因此回归） -->
     <style name="AppTheme.Welcome.Base" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/background</item>
         <item name="postSplashScreenTheme">@style/Base.AppTheme</item>
     </style>
 
     <style name="AppTheme.Welcome" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon</item>
     </style>
 
     <style name="AppTheme.Welcome.Launcher1" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/launcher1</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon1</item>
     </style>
 
     <style name="AppTheme.Welcome.Launcher2" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/launcher2</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon2</item>
     </style>
 
     <style name="AppTheme.Welcome.Launcher3" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/launcher3</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon3</item>
     </style>
 
     <style name="AppTheme.Welcome.Launcher4" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/launcher4</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon4</item>
     </style>
 
     <style name="AppTheme.Welcome.Launcher5" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/launcher5</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon5</item>
     </style>
 
     <style name="AppTheme.Welcome.Launcher6" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/launcher6</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon6</item>
     </style>
 
     <style name="AppTheme.Welcome.Launcher7" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/launcher7</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon7</item>
     </style>
 
     <style name="AppTheme.Welcome.Launcher8" parent="AppTheme.Welcome.Base">
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/launcher8</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon8</item>
     </style>
 
     <!-- Base application theme. -->

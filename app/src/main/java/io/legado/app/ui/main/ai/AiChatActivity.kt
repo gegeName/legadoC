@@ -36,6 +36,7 @@ import io.legado.app.utils.imeHeight
 import io.legado.app.utils.navigationBarHeight
 import io.legado.app.utils.setOnApplyWindowInsetsListenerCompat
 import io.legado.app.utils.setEdgeEffectColor
+import io.legado.app.utils.share
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.showPopupMenu
 import io.legado.app.utils.toastOnUi
@@ -103,6 +104,9 @@ class AiChatActivity : BaseActivity<ActivityAiChatBinding>(
                         PopupMenuAction(getString(R.string.ai_chat_history)) {
                             openHistoryFromMenu()
                         },
+                        PopupMenuAction(getString(R.string.ai_chat_export)) {
+                            exportChatFromMenu()
+                        },
                         PopupMenuAction(getString(R.string.ai_setting)) {
                             openAiSettings()
                         }
@@ -120,6 +124,17 @@ class AiChatActivity : BaseActivity<ActivityAiChatBinding>(
             return
         }
         showHistoryDialog()
+    }
+
+    private fun exportChatFromMenu() {
+        if (viewModel.isRequesting) {
+            toastOnUi(R.string.ai_chat_wait_current)
+            return
+        }
+        viewModel.exportCurrentChat(
+            onResult = { file -> share(file, "application/json") },
+            onError = { toastOnUi(it) }
+        )
     }
 
     private fun startNewChatFromMenu() {
@@ -144,8 +159,6 @@ class AiChatActivity : BaseActivity<ActivityAiChatBinding>(
         }
         binding.rvAiMessages.adapter = adapter
         binding.rvAiMessages.setEdgeEffectColor(primaryColor)
-        binding.btnScrollPrev.setOnClickListener { scrollToPreviousAssistantStart() }
-        binding.btnScrollNext.setOnClickListener { scrollToNextMessageBottom() }
         binding.root.setOnApplyWindowInsetsListenerCompat { _, windowInsets ->
             val imeInset = windowInsets.imeHeight
             val bottomInset = if (imeInset > 0) imeInset else windowInsets.navigationBarHeight
@@ -376,32 +389,6 @@ class AiChatActivity : BaseActivity<ActivityAiChatBinding>(
     private fun hideThinkingPanel() {
         binding.thinkingPanel.isVisible = false
         binding.thinkingScroll.isVisible = false
-    }
-
-    private fun scrollToPreviousAssistantStart() {
-        val items = viewModel.messagesLiveData.value.orEmpty()
-        val layoutManager = binding.rvAiMessages.layoutManager as? LinearLayoutManager ?: return
-        val anchor = layoutManager.findFirstVisibleItemPosition().coerceAtLeast(0)
-        val target = (anchor - 1 downTo 0).firstOrNull {
-            items.getOrNull(it)?.role == AiChatMessage.Role.ASSISTANT
-        } ?: return
-        layoutManager.scrollToPositionWithOffset(target, 0)
-    }
-
-    private fun scrollToNextMessageBottom() {
-        val items = viewModel.messagesLiveData.value.orEmpty()
-        val layoutManager = binding.rvAiMessages.layoutManager as? LinearLayoutManager ?: return
-        val anchor = layoutManager.findLastVisibleItemPosition().coerceAtLeast(0)
-        val target = (anchor + 1 until items.size).firstOrNull() ?: return
-        binding.rvAiMessages.scrollToPosition(target)
-        binding.rvAiMessages.post {
-            val holder = binding.rvAiMessages.findViewHolderForAdapterPosition(target)
-            val bottom = holder?.itemView?.bottom ?: return@post
-            val delta = bottom - binding.rvAiMessages.height
-            if (delta > 0) {
-                binding.rvAiMessages.scrollBy(0, delta)
-            }
-        }
     }
 
     private fun tintSendButton() {

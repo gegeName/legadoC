@@ -227,6 +227,22 @@
     <string name="speak_engine_current">当前引擎</string>
     <string name="read_aloud_float_on_desktop">悬浮到桌面</string>
     <string name="read_aloud_float_on_desktop_summary">在本 App 外显示朗读控制悬浮窗，需要悬浮窗权限；关闭时仅在阅读页内悬浮。</string>
+    <string name="fallback_setting">回退设置</string>
+    <string name="fallback_setting_summary">回退激进的新功能行为</string>
+    <string name="audio_book_direct_audio_play_no_subtitle">无字幕音频书直接进入沉浸式听书</string>
+    <string name="audio_book_direct_audio_play_no_subtitle_summary">开启后，无法获取字幕的音频书直接进入沉浸式听书界面，不再先进阅读界面。</string>
+    <string name="audio_book_direct_audio_play_all">所有音频书直接进入沉浸式听书</string>
+    <string name="audio_book_direct_audio_play_all_summary">开启后，所有音频书都直接进入沉浸式听书界面，优先级高于无字幕规则。</string>
+    <string name="audio_book_direct_audio_play_auto_play">进入听书页后自动播放</string>
+    <string name="audio_book_direct_audio_play_auto_play_summary">开启后，通过以上规则进入沉浸式听书界面后自动开始播放。</string>
+    <string name="read_aloud_floating_outside_reader">朗读悬浮窗在阅读界面外显示</string>
+    <string name="read_aloud_floating_outside_reader_summary">开启后，朗读悬浮窗可以在阅读 APP 内阅读界面外的其他地方显示，和 AI 创作悬浮窗一样；手机桌面显示仍由“悬浮到桌面”控制。</string>
+    <string name="ai_creation_floating_outside_reader">AI 创作悬浮窗在阅读界面外显示</string>
+    <string name="ai_creation_floating_outside_reader_summary">开启后，AI 创作悬浮窗可以在阅读界面以外显示；关闭后只在阅读界面显示。</string>
+    <string name="ai_creation_floating_auto_close">AI 创作悬浮窗定时关闭</string>
+    <string name="ai_creation_floating_auto_close_summary">任务完成后多少秒自动关闭悬浮窗；留空表示不自动关闭。</string>
+    <string name="ai_creation_floating_auto_close_current">当前：%1$s 秒</string>
+    <string name="ai_creation_floating_auto_close_off">已关闭</string>
     <string name="read_aloud_hide_floating_window">隐藏朗读悬浮窗</string>
     <string name="read_aloud_hide_floating_window_summary">不显示朗读控制悬浮窗，仅保留通知栏控制和前台服务通知用于保活。</string>
     <string name="read_aloud_cover_rotation">旋转朗读封面</string>
@@ -382,13 +398,15 @@
     <string name="ai_creation_next">下一步</string>
     <string name="ai_creation_generate_prompt">生成提示词</string>
     <string name="ai_creation_generating">生成中…</string>
-    <string name="ai_creation_copy_prompt">复制提示词</string>
+    <string name="ai_creation_copy">复制</string>
     <string name="ai_creation_copied">已复制</string>
     <string name="ai_creation_staged">已暂存到 AI 创作选中文本</string>
     <string name="ai_creation_prompt_empty">提示词为空</string>
     <string name="ai_creation_compose">组合素材</string>
     <string name="ai_creation_prompt_title">提示词</string>
-    <string name="ai_creation_prompt_hint">生成的提示词将显示在这里</string>
+    <string name="ai_creation_llm_input_hint">LLM输入（可编辑）</string>
+    <string name="ai_creation_manual_prompt_hint">手动填入提示词，生成图片/视频时使用</string>
+    <string name="ai_creation_llm_input_empty">LLM输入为空</string>
     <string name="ai_creation_clear">清空</string>
     <string name="ai_creation_clear_confirm">清空当前创作会话与一次性素材？</string>
     <string name="ai_creation_add">+</string>
@@ -402,8 +420,8 @@
     <string name="ai_creation_linking_hint">请点击或长按另一分区的名称完成连线</string>
     <string name="ai_creation_link_done">分区已连线（%s组）</string>
     <string name="ai_creation_link_removed">已取消连线</string>
-    <string name="ai_creation_select_card_first">请先添加素材卡片</string>
     <string name="ai_creation_new_card">新建卡片</string>
+    <string name="ai_creation_config_sanitized">AI创作配置非法，已恢复默认：%1$s</string>
     <string name="creation_card_delete_confirm">删除该卡片？将同时从当前创作会话中移除。</string>
     <string name="creation_image_import_failed">图片导入失败</string>
     <string name="rename">重命名</string>
@@ -414,13 +432,16 @@
     <string name="ai_creation_provider_summary_empty">未选择</string>
     <string name="ai_creation_model">模型</string>
     <string name="ai_creation_model_summary_empty">未选择</string>
-    <string name="ai_creation_variables">变量与最终提示词定义</string>
-    <string name="ai_creation_variables_invalid">变量与最终提示词定义无效：%1$s</string>
+    <string name="ai_creation_variables">变量定义</string>
+    <string name="ai_creation_variables_invalid">变量定义无效：%1$s</string>
+    <string name="ai_creation_llm_variables">LLM 变量设置</string>
+    <string name="ai_creation_llm_variables_summary">图片/视频的 style 变量、提示词路由与 LLM 输入模板，控制发给 LLM 的内容</string>
+    <string name="ai_creation_llm_variables_hint">JSON 对象，image/video 两节；每节含 variables（style）、routes 与 llmInputTemplate，模板必须且只能各含一次 ${prompt} 和 ${素材}</string>
     <string name="ai_creation_prompt_template">提示词模板</string>
     <string name="ai_creation_prompt_template_summary">JSON 对象，共 %d 条；key 供供应商路由引用，value 必须是无占位符的纯文本</string>
-    <string name="ai_creation_prompt_template_hint">JSON 对象：{ &quot;连环画&quot;: &quot;将素材拆分为连续分镜。&quot; }。这里的 value 不允许占位符；由供应商 finalPrompt 统一组合路由文本与素材</string>
-    <string name="ai_creation_request_template">请求模板</string>
-    <string name="ai_creation_request_template_invalid">请求模板无效：%1$s</string>
+    <string name="ai_creation_prompt_template_hint">JSON 对象：{ &quot;连环画&quot;: &quot;将素材拆分为连续分镜。&quot; }。这里的 value 不允许占位符；由 LLM 变量设置中的输入模板统一组合路由文本与素材</string>
+    <string name="ai_creation_request_template">请求体</string>
+    <string name="ai_creation_request_template_invalid">请求体无效：%1$s</string>
     <string name="ai_creation_test_connection">测试连接</string>
     <string name="ai_creation_test_connection_summary">测试 AI 创作模型连接</string>
     <string name="ai_creation_scope_selected_text">作用域：选中文本</string>
@@ -442,7 +463,7 @@
     <string name="ai_creation_page_info">%1$d/%2$d</string>
     <string name="ai_creation_done_mark">✓</string>
     <string name="ai_creation_slot_failed">生成失败：%1$s</string>
-    <string name="ai_creation_image_request_template">图片请求模板</string>
+    <string name="ai_creation_image_request_template">图片请求体</string>
     <string name="ai_creation_image_add_provider">添加图片供应商</string>
     <string name="ai_creation_image_add_provider_summary">添加自定义图片供应商，内置免费供应商</string>
     <string name="ai_creation_image_manage_providers">管理图片供应商</string>
@@ -466,11 +487,29 @@
     <string name="ai_creation_video_test_running">正在测试视频生成链路（提交并轮询，可能需要数分钟）…</string>
     <string name="ai_creation_video_test_success">测试成功，已返回视频</string>
     <string name="ai_creation_connection_test_failed">测试失败：%1$s</string>
-    <string name="ai_creation_image_variables">图片变量与最终提示词定义</string>
-    <string name="ai_creation_video_variables">视频变量与最终提示词定义</string>
-    <string name="ai_creation_video_request_template">视频请求模板</string>
+    <string name="ai_creation_image_variables">图片变量定义</string>
+    <string name="ai_creation_video_variables">视频变量定义</string>
+    <string name="ai_creation_video_request_template">视频请求体</string>
+    <string name="ai_creation_insert_image_title">插入图片</string>
+    <string name="ai_creation_grid_single">单张</string>
+    <string name="ai_creation_grid_height">总高度</string>
+    <string name="ai_creation_save_md">保存 MD（含图片）</string>
+    <string name="ai_creation_md_saved">MD 已保存到 Download/Legado</string>
+    <string name="ai_creation_md_save_failed">MD 保存失败</string>
+    <string name="ai_creation_insert">插入</string>
+    <string name="ai_creation_stash_hint">已暂存%1$d个，请选择插入位置</string>
+    <string name="ai_creation_stash_gone">暂存的图片已不在</string>
+    <string name="illustration_note_empty">无备注，点击输入</string>
+    <string name="ai_creation_save_workflow">保存工作流</string>
+    <string name="ai_creation_copy_workflow">复制工作流</string>
+    <string name="ai_creation_view_workflow">查看工作流</string>
+    <string name="ai_creation_workflow_missing">未找到工作流元数据</string>
+    <string name="ai_creation_workflow_saved">工作流已保存到 Download/Legado</string>
+    <string name="ai_creation_workflow_save_failed">工作流保存失败</string>
+    <string name="ai_creation_workflow_copied">工作流已复制</string>
     <string name="ai_creation_provider_builtin">内置供应商不可删除</string>
     <string name="ai_creation_provider_required">请先在管理供应商中设为当前供应商</string>
+    <string name="ai_creation_fetch_models_unsupported">当前供应商不支持从接口拉取模型</string>
     <string name="ai_creation_model_required">请先为当前供应商添加模型</string>
     <string name="ai_creation_current_provider_empty">未设当前供应商</string>
     <string name="ai_creation_current_model_empty">未设当前模型</string>
@@ -478,6 +517,11 @@
     <string name="ai_creation_video_edit_provider">编辑视频供应商</string>
     <string name="ai_creation_image_retry_count">生图重试次数</string>
     <string name="ai_creation_image_retry_count_summary">单张请求失败后的重试次数：%1$d</string>
+    <string name="ai_creation_prompt_regenerate_limit">提示词重新生成上限</string>
+    <string name="ai_creation_prompt_regenerate_limit_summary">返回标记校验不通过时自动重新生成的次数上限：%1$d（0 为不重新生成）</string>
+    <string name="ai_creation_save_images">保存图片</string>
+    <string name="ai_creation_images_empty">没有图片</string>
+    <string name="ai_creation_images_saved">已按序保存 %1$d/%2$d 张图片到相册</string>
     <string name="cache_manage_creation">创作</string>
     <string name="cache_manage_creation_delete_confirm">删除选中的 %1$d 张生成图片？</string>
     <string name="ai_reply">AI回复</string>
@@ -531,6 +575,7 @@
     <string name="no_download">暂无任务</string>
     <string name="download_count">已下载 %1$d/%2$d</string>
     <string name="download_count_review">正文 %1$d/%2$d · 评论 %3$d/%4$d</string>
+    <string name="download_count_review_loading">已缓存 %1$d/%2$d · 评论索引加载中…</string>
     <string name="download_count_review_audio">音频与字幕 %1$d/%2$d · 评论 %3$d/%4$d</string>
     <string name="review_notification_detail">正文 %1$d/%2$d · 评论 %3$d/%4$d · 评论快照 %5$d/%6$d</string>
     <string name="import_select_book">导入选择书籍</string>
@@ -1471,7 +1516,7 @@
     <string name="scope_content">作用于正文</string>
     <string name="join_qq_channel">加入 QQ 频道</string>
     <string name="qq_channel_summary">点击加入阅读 QQ 频道</string>
-    <string name="join_telegram_channel">加入我的 QQ 群 1101873338</string>
+    <string name="join_telegram_channel">加入我的 QQ 群 1004372141</string>
     <string name="telegram_channel_summary">长按复制 QQ 群号</string>
     <string name="menu_refresh_dur">刷新当前章节</string>
     <string name="menu_refresh_after">刷新之后章节</string>
@@ -1916,8 +1961,6 @@
     <string name="ai_set_current_provider">设为当前提供商</string>
     <string name="ai_edit_provider">编辑提供商</string>
     <string name="ai_remove_provider">删除提供商</string>
-    <string name="ai_remove_provider_confirm">确定删除这个提供商吗？</string>
-    <string name="ai_remove_provider_confirm_with_models">确定删除这个提供商吗？关联的 %1$d 个模型也会一起删除</string>
     <string name="ai_provider_saved">已保存提供商</string>
     <string name="ai_provider_removed">已删除提供商</string>
     <string name="ai_model">模型</string>
@@ -1926,6 +1969,7 @@
     <string name="ai_api_key">API Key</string>
     <string name="ai_api_key_summary">用于 Authorization 鉴权</string>
     <string name="ai_custom_headers">自定义请求头</string>
+    <string name="ai_provider_support_vision">支持多模态（媒体输入）</string>
     <string name="ai_web_tools">AI 联网工具</string>
     <string name="ai_tavily_enable">启用 Tavily 搜索</string>
     <string name="ai_tavily_enable_summary">将 Tavily 暴露给 AI 作为实时联网搜索工具</string>
@@ -1968,10 +2012,23 @@
     <string name="ai_manage_models">管理模型</string>
     <string name="ai_manage_models_summary">已添加 %1$d 个模型</string>
     <string name="ai_edit_model">编辑模型</string>
-    <string name="ai_edit_request">编辑请求</string>
+    <string name="ai_edit_request">编辑请求体</string>
     <string name="ai_edit_request_summary">编辑章节净化及其连通性测试使用的 JSON 请求体。</string>
+    <string name="ai_send_image_max_resolution">发送图片最大分辨率</string>
+    <string name="ai_context_trim">模型上下文设置</string>
+    <string name="ai_context_trim_summary">设置上下文与压缩策略</string>
+    <string name="ai_context_max_tokens">模型最大上下文（token）</string>
+    <string name="ai_context_trim_to_tokens">超过后裁剪到（token）</string>
+    <string name="ai_context_tool_trim">裁剪工具输出</string>
+    <string name="ai_context_tool_trim_mode">工具输出裁剪模式</string>
+    <string name="ai_context_tool_trim_mode_head_tail">保留头尾（平均分配）</string>
+    <string name="ai_context_tool_trim_mode_head">仅保留头</string>
+    <string name="ai_context_tool_trim_mode_tail">仅保留尾</string>
+    <string name="ai_context_tool_trim_chars">工具输出裁剪阈值（字符）</string>
+    <string name="ai_context_trim_invalid">必须为正整数，且裁剪目标必须小于最大上下文</string>
+    <string name="ai_send_image_max_resolution_summary">图片分辨率预算</string>
     <string name="ai_edit_request_hint">结构化请求 JSON</string>
-    <string name="ai_edit_request_invalid">请求模板无效：%s</string>
+    <string name="ai_edit_request_invalid">请求体无效：%s</string>
     <string name="ai_model_saved">已保存模型</string>
     <string name="ai_chapter_purify">AI 章节净化</string>
     <string name="ai_connection_test">测试当前模型连接</string>
@@ -1997,7 +2054,6 @@
     <string name="ai_chapter_purify_prompt_summary">编辑任务说明；JSON 协议始终由客户端固定。</string>
     <string name="ai_chapter_purify_prompt_hint">输入章节净化任务说明</string>
     <string name="ai_chapter_purify_flow_info">AI章节净化流程说明</string>
-    <string name="ai_chapter_purify_flow_info_summary">查看 A、B、C、D 四阶段文本处理流程和预处理作用域。</string>
     <string name="ai_chapter_purify_flow_info_message">A 书源原文\n↓ 已有净化替换规则\nB 没开AI净化的状态\n↓ AI输入预处理\nC 送入AI大模型的文本\n↓ AI生成的新替换规则\nD 净化后的成品\n\n预处理作用域：\nad：广告识别\ntypo：修正错别字\nnoise：清理噪声</string>
     <string name="ai_chapter_purify_preprocess">编辑 AI 输入预处理</string>
     <string name="ai_chapter_purify_preprocess_summary">编辑 B 到 C 的段落级 JSON 正则和 scopes 作用域；不会处理段号或段落边界。</string>
@@ -2045,6 +2101,7 @@
     <string name="ai_disable_mcp_server">停用服务器</string>
     <string name="ai_chat_empty">开始新的对话</string>
     <string name="ai_chat_history">对话历史</string>
+    <string name="ai_chat_export">导出对话</string>
     <string name="ai_history_empty">暂无对话历史</string>
     <string name="ai_new_chat">新对话</string>
     <string name="ai_history_open">打开对话</string>
@@ -2057,12 +2114,10 @@
     <string name="ai_chat_send">发送</string>
     <string name="ai_chat_stop">停止</string>
     <string name="ai_chat_thinking">正在思考…</string>
-    <string name="ai_read_clear_history">清空本书历史</string>
-    <string name="ai_read_history_empty">本书暂无问 AI 历史</string>
-    <string name="ai_read_delete_history">删除这条记录</string>
-    <string name="ai_read_clear_history_confirm">清空本书全部问 AI 历史？</string>
     <string name="ai_chat_thinking_collapsed">正在思考，点按展开</string>
     <string name="ai_chat_thinking_done">思考完成，点按展开</string>
+    <string name="ai_chat_think">思考</string>
+    <string name="ai_chat_thought_done">已思考</string>
     <string name="select">选择</string>
     <string name="expand">展开</string>
     <string name="collapse">收起</string>
@@ -2107,7 +2162,6 @@
     <string name="ai_no_models">暂无模型</string>
     <string name="ai_set_current">设为当前模型</string>
     <string name="ai_remove_model">删除模型</string>
-    <string name="ai_remove_model_confirm">确定删除这个模型吗？</string>
     <string name="ai_model_removed">已删除模型</string>
     <string name="ai_request_failed">请求失败：%s</string>
     <string name="ai_request_cancelled">请求已取消</string>
@@ -2346,6 +2400,8 @@
     <string name="cache_manage_no_cache">没有可上传的缓存</string>
     <string name="cache_manage_pack_failed">缓存打包失败</string>
     <string name="cache_manage_upload_all">上传全部</string>
+    <string name="cache_manage_workflow_exported">已导出 %1$d 份工作流</string>
+    <string name="cache_manage_workflow_missing_part">；%1$d 项未包含工作流元数据</string>
     <string name="cache_manage_delete_all">删除全部</string>
     <string name="cache_manage_batch_empty">没有可操作的缓存</string>
     <string name="cache_manage_batch_upload_done">批量上传完成：成功 %1$d，失败 %2$d</string>
@@ -2377,8 +2433,10 @@
     <string name="cache_manage_review_snapshots">评论快照</string>
     <string name="cache_manage_review_chapter">第%1$d章</string>
     <string name="cache_manage_review_progress">%1$d/%2$d</string>
+    <string name="cache_manage_review_persisted">已有%1$d份快照</string>
     <string name="cache_manage_review_success">成功</string>
     <string name="cache_manage_review_failed">失败%1$d</string>
+    <string name="cache_manage_review_status_missing">状态未记录，可重新缓存本章</string>
     <string name="cache_manage_review_retry">重试</string>
     <string name="cache_manage_review_retry_all">全部重试失败项</string>
     <string name="cache_manage_review_empty">暂无评论快照</string>
@@ -2441,15 +2499,6 @@
     <string name="read_rank_widget_description">阅读排行桌面组件</string>
     <string name="color_format_error">颜色格式不正确</string>
     <string name="unknown">未知</string>
-    <string name="ai_read_prompt_template">你是阅读页里的问 AI 助手。请围绕当前书籍和选中文本回答，优先解释原文含义、上下文、人物关系、伏笔或用户提问，不要编造未给出的剧情。
-
-书名：%1$s
-作者：%2$s
-书源：%3$s
-当前章节：%4$s（第 %5$d 章）
-
-用户选中或追问：
-%6$s</string>
     <string name="epub_parse_mode">EPUB解析方式</string>
     <string name="epub_parse_mode_new">新版</string>
     <string name="epub_parse_mode_classic">经典</string>
@@ -2465,11 +2514,13 @@
     <string name="ai_provider_and_model">供应商与模型</string>
     <string name="ai_logs_category">日志</string>
     <string name="ai_timeout">超时</string>
-    <string name="ai_edit_request_summary_global">章节净化和当前模型连接测试使用的全局默认 JSON 请求体。</string>
+    <string name="ai_edit_request_summary_global">编辑请求体内容</string>
     <string name="ai_chapter_purify_request_template">编辑请求</string>
-    <string name="ai_chapter_purify_request_template_summary_inherited">未单独配置，继承全局请求模板。</string>
-    <string name="ai_chapter_purify_request_template_summary_custom">使用独立请求模板。</string>
-    <string name="ai_restore_global_request">恢复全局请求</string>
+    <string name="ai_chapter_purify_request_template_summary">章节净化专用 JSON 请求体，默认带 response_format=json_object。</string>
+    <string name="ai_storyboard_request_template">编辑分镜请求体</string>
+    <string name="ai_storyboard_request_template_summary">AI 分镜专用 JSON 请求体，默认带 response_format=json_object。</string>
+    <string name="ai_casting_request_template">编辑选角请求体</string>
+    <string name="ai_casting_request_template_summary">AI 选角专用 JSON 请求体，默认带 response_format=json_object。</string>
     <string name="disable_source_toast">关闭书源底部弹窗</string>
     <string name="disable_source_toast_summary">不显示书源脚本通过 toast 或 longToast 发出的底部弹窗</string>
     <string name="disable_all_toast">关闭所有底部弹窗</string>
@@ -2521,9 +2572,12 @@
     <string name="homepage_module_count">%d 个模块</string>
     <string name="homepage_empty_title">还没有主页模块</string>
     <string name="homepage_empty_desc">点击顶栏管理按钮添加模块</string>
-    <string name="homepage_load_failed">加载失败，点击重试</string>
+    <string name="homepage_load_failed">加载失败</string>
+    <string name="homepage_click_retry">点击重试</string>
     <string name="homepage_load_more">加载更多</string>
     <string name="homepage_loading">加载中</string>
+    <string name="homepage_expand_all">展开全部</string>
+    <string name="homepage_collapse">收起</string>
     <string name="homepage_new_custom_set">新建集</string>
     <string name="homepage_browse_book_sources">浏览书源</string>
     <string name="homepage_browse_rss_sources">浏览订阅源</string>
@@ -2571,10 +2625,8 @@
     <string name="homepage_layout_mixed">混合列表</string>
     <string name="homepage_layout_source_tab">分源Tab</string>
     <string name="homepage_preload">预加载相邻集</string>
-    <string name="homepage_select_category">选择分类</string>
-    <string name="homepage_select_pagination">选择分页</string>
+    <string name="homepage_select_kinds">选择分类</string>
     <string name="homepage_drag_sort">拖动排序</string>
-    <string name="homepage_multi_select_hint">可选择多个分类合并为一个模块</string>
     <string name="homepage_selected_categories_count">已选 %d 个分类</string>
     <string name="homepage_loading_categories">正在加载分类</string>
     <string name="homepage_manual_add_module">手动添加模块</string>

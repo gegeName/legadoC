@@ -10,6 +10,7 @@ import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
 import io.legado.app.help.AppFreezeMonitor
 import io.legado.app.help.DispatchersMonitor
+import io.legado.app.plugin.AiBuiltinDefaults
 import io.legado.app.utils.GSON
 import io.legado.app.utils.canvasrecorder.CanvasRecorderFactory
 import io.legado.app.utils.defaultSharedPreferences
@@ -32,11 +33,8 @@ import io.legado.app.utils.removePref
 import io.legado.app.utils.sysConfiguration
 import io.legado.app.utils.toastOnUi
 import io.legado.app.ui.main.ai.AiChatSession
-import io.legado.app.ui.main.ai.AiMcpServerConfig
 import io.legado.app.ui.main.ai.AiModelConfig
 import io.legado.app.ui.main.ai.AiProviderConfig
-import io.legado.app.ui.main.ai.AiSkillConfig
-import io.legado.app.ui.book.read.ReadAiBookHistory
 import splitties.init.appCtx
 import java.math.BigDecimal
 import java.net.InetAddress
@@ -54,13 +52,17 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     const val EPUB_PARSE_MODE_NEW = 0
     const val EPUB_PARSE_MODE_CLASSIC = 1
 
-    const val DEFAULT_AI_SYSTEM_PROMPT =
-        "你是阅读应用内的 AI 助手。回答直接、准确、简洁。需要真实应用数据时必须优先调用工具，工具返回的数据优先级高于你的记忆，不允许编造工具未返回的结果。用户询问书架、书籍、作者、阅读记录、书籍简介、书源、分组、标签、分类方案时，必须先调用 query_bookshelf、get_bookshelf_book_info、manage_bookshelf_group 或 manage_bookshelf_tag，不要只说“我先看看”却不调用工具。用户要求创建、修改或调试书源时，你要像一个小型书源 agent 一样闭环执行：新建书源先调用 create_book_source(save=false) 生成草稿；修改已有书源先调用 get_book_source 读取完整 JSON；缺少页面结构时调用 fetch_source_html 获取搜索页、详情页、目录页或正文页 HTML；每次调试失败后都调用 update_book_source(save=false) 按日志和 HTML 修正规则，可传 patch，也可直接传 ruleToc/ruleContent/searchUrl 等字段；再调用 debug_book_source 调试，优先使用用户给出的详情页 URL、目录 URL、正文 URL 或关键词；最多循环 3 次。不要在第一次调试前询问“是否继续”，也不要只输出未经调试的 JSON。只有搜索、详情、目录、正文主要链路通过，或达到 3 次仍失败时，才给出最终结果和剩余失败点。只有用户明确要求保存、导入或完成时，才调用 update_book_source(save=true) 或 create_book_source(save=true) 写入本地书源库。用户要求整理书架时，顶层书架使用分组，分组内的小分类使用书籍标签；未分标签的书按“全部”处理。批量设置标签、重命名标签、移动分组或删除分组前，先查询书架并给出方案，用户确认后再调用写入工具。任何情况下都不允许删除书籍。"
-
     const val DEFAULT_AI_PROVIDER_NAME = "opencode-zen"
     const val DEFAULT_AI_PROVIDER_BASE_URL = "https://opencode.ai/zen/v1"
     const val DEFAULT_AI_PROVIDER_API_KEY = "public"
     const val DEFAULT_AI_MODEL_ID = "big-pickle"
+
+    //出厂第二供应商：本机 local-core 落地后端，只管连线（地址/钥匙/多模态开关），
+    //名下不挂默认模型（模型只当参数，用户在“添加模型”里自己加）；当前选择不动，仍是默认供应商。
+    const val LOCAL_CORE_PROVIDER_ID = "builtin-llm-localcore"
+    const val LOCAL_CORE_PROVIDER_NAME = "local-core"
+    const val LOCAL_CORE_PROVIDER_BASE_URL = "http://127.0.0.1:11434/v1"
+    const val LOCAL_CORE_PROVIDER_API_KEY = "test"
 
     val isCronet = appCtx.getPrefBoolean(PreferKey.cronet)
     var useAntiAlias = appCtx.getPrefBoolean(PreferKey.antiAlias)
@@ -482,10 +484,8 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     var aiAssistantEnabled: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.aiAssistantEnabled, false) && aiCurrentModelConfig != null
-        set(value) {
-            appCtx.putPrefBoolean(PreferKey.aiAssistantEnabled, value && aiCurrentModelConfig != null)
-        }
+        get() = io.legado.app.help.agent.AgentConfig.enabled
+        set(value) { io.legado.app.help.agent.AgentConfig.enabled = value }
 
     var aiProviderList: List<AiProviderConfig>
         get() {
@@ -563,293 +563,46 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val aiCurrentModelConfig: AiModelConfig?
         get() = aiModelConfigList.firstOrNull { it.id == aiCurrentModelId }
 
-    var aiMcpServerList: List<AiMcpServerConfig>
-        get() = readAiMcpServers()
-        set(value) {
-            persistAiMcpServers(normalizeAiMcpServers(value))
-        }
-
-    val aiEnabledMcpServers: List<AiMcpServerConfig>
-        get() = aiMcpServerList.filter { it.enabled }
-
     var aiChatSessionList: List<AiChatSession>
-        get() = runCatching {
-            GSON.fromJsonArray<AiChatSession>(appCtx.getPrefString(PreferKey.aiChatSessionList))
-                .getOrDefault(emptyList())
-                .filter { session ->
-                    session.id.isNotBlank() &&
-                            session.title.isNotBlank() &&
-                            session.messages.all { it.content.isNotBlank() }
-                }
-                .map { session ->
-                    session.copy(
-                        messages = session.messages.map { message ->
-                            message.copy(
-                                kind = message.kind ?: io.legado.app.ui.main.ai.AiChatMessage.Kind.TEXT,
-                                statusName = message.statusName,
-                                statusStage = message.statusStage,
-                                statusSuccess = message.statusSuccess
-                            )
-                        }
-                    )
-                }
-                .sortedByDescending { it.updatedAt }
-        }.getOrElse {
-            AppLog.put("读取 AI 聊天历史失败, 已清理历史\n${it.localizedMessage}", it)
-            appCtx.removePref(PreferKey.aiChatSessionList)
-            appCtx.removePref(PreferKey.aiCurrentChatSessionId)
-            emptyList()
-        }
-        set(value) {
-            val sessions = value.distinctBy { it.id }
-                .mapNotNull { session ->
-                    val title = session.title.trim()
-                    val normalizedMessages = session.messages
-                        .filter { it.content.isNotBlank() }
-                        .map { it.copy(pending = false) }
-                    if (session.id.isBlank() || title.isBlank() || normalizedMessages.isEmpty()) {
-                        null
-                    } else {
-                        session.copy(
-                            id = session.id.trim(),
-                            title = title,
-                            messages = normalizedMessages
-                        )
-                    }
-                }
-                .sortedByDescending { it.updatedAt }
-                .take(30)
-            if (sessions.isEmpty()) {
-                appCtx.removePref(PreferKey.aiChatSessionList)
-            } else {
-                appCtx.putPrefString(PreferKey.aiChatSessionList, GSON.toJson(sessions))
-            }
-            val currentId = appCtx.getPrefString(PreferKey.aiCurrentChatSessionId)
-            if (currentId != null && sessions.none { it.id == currentId }) {
-                appCtx.removePref(PreferKey.aiCurrentChatSessionId)
-            }
-        }
-
-    var aiReadHistoryList: List<ReadAiBookHistory>
-        get() = runCatching {
-            readAiReadHistories()
-                .filter { it.bookUrl.isNotBlank() && it.sessions.isNotEmpty() }
-                .map { history ->
-                    val sessions = history.sessions
-                        .filter { it.id.isNotBlank() && it.messages.any { message -> message.content.isNotBlank() } }
-                        .map { session ->
-                            session.copy(
-                                messages = session.messages.filter { it.content.isNotBlank() }
-                            )
-                        }
-                        .sortedByDescending { it.updatedAt }
-                        .take(20)
-                    history.copy(
-                        bookUrl = history.bookUrl.trim(),
-                        bookName = history.bookName.trim(),
-                        currentSessionId = history.currentSessionId.takeIf { id -> sessions.any { it.id == id } }
-                            ?: sessions.firstOrNull()?.id.orEmpty(),
-                        sessions = sessions
-                    )
-                }
-                .filter { it.sessions.isNotEmpty() }
-                .sortedByDescending { it.updatedAt }
-                .take(200)
-        }.getOrElse {
-            AppLog.put("读取阅读问 AI 历史失败, 已清理历史\n${it.localizedMessage}", it)
-            appCtx.removePref(PreferKey.aiReadHistoryList)
-            emptyList()
-        }
-        set(value) {
-            val histories = value.distinctBy { it.bookUrl }
-                .mapNotNull { history ->
-                    val bookUrl = history.bookUrl.trim()
-                    val sessions = history.sessions
-                        .filter { it.id.isNotBlank() && it.messages.any { message -> message.content.isNotBlank() } }
-                        .map { session ->
-                            session.copy(
-                                messages = session.messages.filter { it.content.isNotBlank() }.takeLast(80)
-                            )
-                        }
-                        .sortedByDescending { it.updatedAt }
-                        .take(20)
-                    if (bookUrl.isBlank() || sessions.isEmpty()) {
-                        null
-                    } else {
-                        history.copy(
-                            bookUrl = bookUrl,
-                            bookName = history.bookName.trim(),
-                            updatedAt = history.updatedAt,
-                            currentSessionId = history.currentSessionId.takeIf { id -> sessions.any { it.id == id } }
-                                ?: sessions.first().id,
-                            sessions = sessions
-                        )
-                    }
-                }
-                .sortedByDescending { it.updatedAt }
-                .take(200)
-            if (histories.isEmpty()) {
-                appCtx.removePref(PreferKey.aiReadHistoryList)
-            } else {
-                appCtx.putPrefString(PreferKey.aiReadHistoryList, GSON.toJson(histories))
-            }
-        }
-
-    private fun readAiReadHistories(): List<ReadAiBookHistory> {
-        val raw = appCtx.getPrefString(PreferKey.aiReadHistoryList).orEmpty()
-        val histories = GSON.fromJsonArray<ReadAiBookHistory>(raw).getOrDefault(emptyList())
-        if (histories.any { it.sessions.isNotEmpty() }) {
-            return histories
-        }
-        return migrateLegacyReadAiHistories(raw)
-    }
-
-    private fun migrateLegacyReadAiHistories(raw: String): List<ReadAiBookHistory> {
-        return runCatching {
-            org.json.JSONArray(raw).let { array ->
-                buildList {
-                    for (index in 0 until array.length()) {
-                        val item = array.optJSONObject(index) ?: continue
-                        val records = item.optJSONArray("records") ?: continue
-                        val sessions = buildList {
-                            for (recordIndex in 0 until records.length()) {
-                                val record = records.optJSONObject(recordIndex) ?: continue
-                                val question = record.optString("question")
-                                val answer = record.optString("answer")
-                                if (question.isBlank() || answer.isBlank()) continue
-                                val createdAt = record.optLong("createdAt", System.currentTimeMillis())
-                                add(
-                                    io.legado.app.ui.book.read.ReadAiSession(
-                                        id = record.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
-                                        title = question.lineSequence().firstOrNull().orEmpty().take(24),
-                                        chapterTitle = record.optString("chapterTitle"),
-                                        chapterIndex = record.optInt("chapterIndex", -1),
-                                        createdAt = createdAt,
-                                        updatedAt = createdAt,
-                                        messages = listOf(
-                                            io.legado.app.ui.book.read.ReadAiMessage(
-                                                role = io.legado.app.ui.book.read.ReadAiMessage.Role.USER,
-                                                content = question,
-                                                createdAt = createdAt
-                                            ),
-                                            io.legado.app.ui.book.read.ReadAiMessage(
-                                                role = io.legado.app.ui.book.read.ReadAiMessage.Role.ASSISTANT,
-                                                content = answer,
-                                                createdAt = createdAt
-                                            )
-                                        )
-                                    )
-                                )
-                            }
-                        }
-                        if (sessions.isNotEmpty()) {
-                            add(
-                                ReadAiBookHistory(
-                                    bookUrl = item.optString("bookUrl"),
-                                    bookName = item.optString("bookName"),
-                                    updatedAt = item.optLong("updatedAt", sessions.maxOf { it.updatedAt }),
-                                    currentSessionId = sessions.first().id,
-                                    sessions = sessions
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-        }.getOrDefault(emptyList())
-    }
+        get() = io.legado.app.help.agent.AgentHistory.chat
+        set(value) { io.legado.app.help.agent.AgentHistory.chat = value }
 
     var aiCurrentChatSessionId: String?
-        get() = appCtx.getPrefString(PreferKey.aiCurrentChatSessionId)
-        set(value) {
-            if (value.isNullOrBlank()) {
-                appCtx.removePref(PreferKey.aiCurrentChatSessionId)
-            } else {
-                appCtx.putPrefString(PreferKey.aiCurrentChatSessionId, value.trim())
-            }
-        }
-
-    var aiSystemPrompt: String
-        get() = appCtx.getPrefString(PreferKey.aiSystemPrompt, DEFAULT_AI_SYSTEM_PROMPT)
-            ?: DEFAULT_AI_SYSTEM_PROMPT
-        set(value) {
-            val prompt = value.trim()
-            if (prompt.isBlank() || prompt == DEFAULT_AI_SYSTEM_PROMPT) {
-                appCtx.removePref(PreferKey.aiSystemPrompt)
-            } else {
-                appCtx.putPrefString(PreferKey.aiSystemPrompt, prompt)
-            }
-        }
-
-    var aiSkillPrompt: String
-        get() = appCtx.getPrefString(PreferKey.aiSkillPrompt).orEmpty()
-        set(value) {
-            val prompt = value.trim()
-            if (prompt.isBlank()) {
-                appCtx.removePref(PreferKey.aiSkillPrompt)
-            } else {
-                appCtx.putPrefString(PreferKey.aiSkillPrompt, prompt)
-            }
-        }
-
-    var aiSkillList: List<AiSkillConfig>
-        get() = readAiSkills()
-        set(value) {
-            persistAiSkills(normalizeAiSkills(value))
-        }
-
-    var aiTavilyEnabled: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.aiTavilyEnabled, false)
-        set(value) = appCtx.putPrefBoolean(PreferKey.aiTavilyEnabled, value)
+        get() = io.legado.app.help.agent.AgentHistory.currentChat
+        set(value) { io.legado.app.help.agent.AgentHistory.currentChat = value }
 
     var aiShowToolSummary: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.aiShowToolSummary, false)
-        set(value) = appCtx.putPrefBoolean(PreferKey.aiShowToolSummary, value)
+        get() = io.legado.app.help.agent.AgentConfig.value("ui").getBoolean("showToolSummary")
+        set(value) { io.legado.app.help.agent.AgentStore.put("config", "ui", io.legado.app.help.agent.AgentConfig.value("ui").put("showToolSummary", value)) }
 
     var aiEnterToSend: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.aiEnterToSend, true)
-        set(value) = appCtx.putPrefBoolean(PreferKey.aiEnterToSend, value)
-
-    var aiEnabledToolNames: Set<String>
-        get() = appCtx.getPrefStringSet(PreferKey.aiEnabledToolNames, mutableSetOf())
-            ?.filter { it.isNotBlank() }
-            ?.toSet()
-            ?: emptySet<String>()
-        set(value) = appCtx.putPrefStringSet(
-            PreferKey.aiEnabledToolNames,
-            value.filter { it.isNotBlank() }.toMutableSet()
-        )
+        get() = io.legado.app.help.agent.AgentConfig.value("ui").getBoolean("enterToSend")
+        set(value) { io.legado.app.help.agent.AgentStore.put("config", "ui", io.legado.app.help.agent.AgentConfig.value("ui").put("enterToSend", value)) }
 
     var aiTavilyApiKey: String
-        get() = appCtx.getPrefString(PreferKey.aiTavilyApiKey).orEmpty()
-        set(value) {
-            val key = value.trim()
-            if (key.isBlank()) appCtx.removePref(PreferKey.aiTavilyApiKey)
-            else appCtx.putPrefString(PreferKey.aiTavilyApiKey, key)
-        }
+        get() = io.legado.app.help.agent.AgentConfig.moduleSettings("web").getString("apiKey")
+        set(value) { updateAgentWebSetting("apiKey", value) }
 
     var aiTavilyBaseUrl: String
-        get() = appCtx.getPrefString(PreferKey.aiTavilyBaseUrl, "https://api.tavily.com/search")
-            ?: "https://api.tavily.com/search"
-        set(value) {
-            val url = value.trim().ifBlank { "https://api.tavily.com/search" }
-            appCtx.putPrefString(PreferKey.aiTavilyBaseUrl, url)
-        }
+        get() = io.legado.app.help.agent.AgentConfig.moduleSettings("web").getString("baseUrl")
+        set(value) { updateAgentWebSetting("baseUrl", value) }
 
     var aiTavilySearchDepth: String
-        get() = appCtx.getPrefString(PreferKey.aiTavilySearchDepth, "basic") ?: "basic"
-        set(value) = appCtx.putPrefString(PreferKey.aiTavilySearchDepth, value.trim().ifBlank { "basic" })
+        get() = io.legado.app.help.agent.AgentConfig.moduleSettings("web").getString("searchDepth")
+        set(value) { updateAgentWebSetting("searchDepth", value) }
 
     var aiTavilyTopic: String
-        get() = appCtx.getPrefString(PreferKey.aiTavilyTopic, "general") ?: "general"
-        set(value) = appCtx.putPrefString(PreferKey.aiTavilyTopic, value.trim().ifBlank { "general" })
+        get() = io.legado.app.help.agent.AgentConfig.moduleSettings("web").getString("topic")
+        set(value) { updateAgentWebSetting("topic", value) }
 
     var aiTavilyMaxResults: Int
-        get() = appCtx.getPrefInt(PreferKey.aiTavilyMaxResults, 5).coerceIn(1, 10)
-        set(value) = appCtx.putPrefInt(PreferKey.aiTavilyMaxResults, value.coerceIn(1, 10))
+        get() = io.legado.app.help.agent.AgentConfig.moduleSettings("web").getInt("maxResults")
+        set(value) { updateAgentWebSetting("maxResults", value) }
 
-    val aiEnabledSkills: List<AiSkillConfig>
-        get() = aiSkillList.filter { it.enabled }
+    private fun updateAgentWebSetting(key: String, value: Any) {
+        io.legado.app.help.agent.AgentStore.put("module.settings", "web",
+            io.legado.app.help.agent.AgentConfig.moduleSettings("web").put(key, value))
+    }
 
     private fun readAiProviders(): List<AiProviderConfig> {
         migrateLegacyAiConfigIfNeeded()
@@ -921,94 +674,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
     }
 
-    private fun readAiMcpServers(): List<AiMcpServerConfig> {
-        return normalizeAiMcpServers(
-            GSON.fromJsonArray<AiMcpServerConfig>(appCtx.getPrefString(PreferKey.aiMcpServerList))
-                .getOrDefault(emptyList())
-        )
-    }
-
-    private fun normalizeAiMcpServers(value: List<AiMcpServerConfig>): List<AiMcpServerConfig> {
-        return value.mapNotNull { server ->
-            val id = server.id.trim()
-            val name = server.name.trim()
-            val endpoint = server.endpoint.trim()
-            if (id.isEmpty() || name.isEmpty() || endpoint.isEmpty()) {
-                null
-            } else {
-                server.copy(
-                    id = id,
-                    name = name,
-                    endpoint = endpoint,
-                    apiKey = server.apiKey.trim()
-                )
-            }
-        }.distinctBy { it.id }
-    }
-
-    private fun persistAiMcpServers(servers: List<AiMcpServerConfig>) {
-        if (servers.isEmpty()) {
-            appCtx.removePref(PreferKey.aiMcpServerList)
-        } else {
-            appCtx.putPrefString(PreferKey.aiMcpServerList, GSON.toJson(servers))
-        }
-    }
-
-    private fun readAiSkills(): List<AiSkillConfig> {
-        migrateLegacyAiSkillIfNeeded()
-        return normalizeAiSkills(
-            GSON.fromJsonArray<AiSkillConfig>(appCtx.getPrefString(PreferKey.aiSkillList))
-                .getOrDefault(emptyList())
-        )
-    }
-
-    private fun normalizeAiSkills(value: List<AiSkillConfig>): List<AiSkillConfig> {
-        return value.mapNotNull { skill ->
-            val id = skill.id.trim()
-            val name = skill.name.trim()
-            val content = skill.content.trim()
-            if (id.isEmpty() || name.isEmpty() || content.isEmpty()) {
-                null
-            } else {
-                skill.copy(
-                    id = id,
-                    name = name,
-                    description = skill.description.trim(),
-                    content = content,
-                    sourceUrl = skill.sourceUrl.trim()
-                )
-            }
-        }.distinctBy { it.id }
-    }
-
-    private fun persistAiSkills(skills: List<AiSkillConfig>) {
-        if (skills.isEmpty()) {
-            appCtx.removePref(PreferKey.aiSkillList)
-        } else {
-            appCtx.putPrefString(PreferKey.aiSkillList, GSON.toJson(skills))
-        }
-    }
-
-    private fun migrateLegacyAiSkillIfNeeded() {
-        if (!appCtx.getPrefString(PreferKey.aiSkillList).isNullOrBlank()) {
-            return
-        }
-        val prompt = appCtx.getPrefString(PreferKey.aiSkillPrompt).orEmpty().trim()
-        if (prompt.isBlank()) {
-            return
-        }
-        persistAiSkills(
-            listOf(
-                AiSkillConfig(
-                    name = "Legado Skill",
-                    description = "从旧版单文本 Skill 配置迁移",
-                    content = prompt
-                )
-            )
-        )
-        appCtx.removePref(PreferKey.aiSkillPrompt)
-    }
-
     private fun syncAiState(
         providers: List<AiProviderConfig>,
         models: List<AiModelConfig>
@@ -1020,7 +685,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         if (providerId.isNullOrBlank()) {
             appCtx.removePref(PreferKey.aiCurrentProviderId)
             appCtx.removePref(PreferKey.aiCurrentModelId)
-            appCtx.putPrefBoolean(PreferKey.aiAssistantEnabled, false)
             return
         }
 
@@ -1035,7 +699,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
         if (currentModelId.isNullOrBlank()) {
             appCtx.removePref(PreferKey.aiCurrentModelId)
-            appCtx.putPrefBoolean(PreferKey.aiAssistantEnabled, false)
         } else if (currentModelId != appCtx.getPrefString(PreferKey.aiCurrentModelId)) {
             appCtx.putPrefString(PreferKey.aiCurrentModelId, currentModelId)
         }
@@ -1074,7 +737,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         val currentModel = models.firstOrNull { it.modelId == legacyCurrentModel } ?: models.firstOrNull()
         if (currentModel == null) {
             appCtx.removePref(PreferKey.aiCurrentModelId)
-            appCtx.putPrefBoolean(PreferKey.aiAssistantEnabled, false)
         } else {
             appCtx.putPrefString(PreferKey.aiCurrentModelId, currentModel.id)
         }
@@ -1082,21 +744,76 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     private fun ensureDefaultAiConfigIfNeeded() {
         if (appCtx.getPrefBoolean(PreferKey.aiDefaultConfigSeeded, false)) {
+            fillDefaultAiHeadersIfNeeded()
+            ensureLocalCoreProviderIfMissing()
             return
         }
         if (appCtx.getPrefString(PreferKey.aiProviderList).isNullOrBlank()) {
             val provider = AiProviderConfig(
                 name = DEFAULT_AI_PROVIDER_NAME,
                 baseUrl = DEFAULT_AI_PROVIDER_BASE_URL,
-                apiKey = DEFAULT_AI_PROVIDER_API_KEY
+                apiKey = DEFAULT_AI_PROVIDER_API_KEY,
+                headers = AiBuiltinDefaults.llmHeaders(),
+                //opencode-zen 不支持多模态：有图进来转文字占位，不拼图数组
+                supportVision = false
             )
             val model = AiModelConfig(providerId = provider.id, modelId = DEFAULT_AI_MODEL_ID)
-            persistAiProviders(listOf(provider))
+            persistAiProviders(listOf(provider, defaultLocalCoreProvider()))
             persistAiModels(listOf(model))
             appCtx.putPrefString(PreferKey.aiCurrentProviderId, provider.id)
             appCtx.putPrefString(PreferKey.aiCurrentModelId, model.id)
         }
         appCtx.putPrefBoolean(PreferKey.aiDefaultConfigSeeded, true)
+        appCtx.putPrefBoolean(PreferKey.aiLlmBuiltinHeadersFilled, true)
+    }
+
+    private fun defaultLocalCoreProvider(): AiProviderConfig = AiProviderConfig(
+        id = LOCAL_CORE_PROVIDER_ID,
+        name = LOCAL_CORE_PROVIDER_NAME,
+        baseUrl = LOCAL_CORE_PROVIDER_BASE_URL,
+        apiKey = LOCAL_CORE_PROVIDER_API_KEY,
+        supportVision = true
+    )
+
+    /**
+     * 存量补齐：已有出厂标记的老机器缺 local-core 时追加一个，模型与当前选择一律不动。
+     * 按 id/名/地址三者任一命中即视为已存在（用户自建的同名同址项不重复加，也不动用户改过的钥匙）。
+     * 列表为空是用户清空了全部供应商，保持清空，不复活。
+     */
+    private fun ensureLocalCoreProviderIfMissing() {
+        val providers = GSON.fromJsonArray<AiProviderConfig>(
+            appCtx.getPrefString(PreferKey.aiProviderList)
+        ).getOrDefault(emptyList())
+        if (providers.isEmpty()) return
+        val factoryBaseUrl = LOCAL_CORE_PROVIDER_BASE_URL.trim().trimEnd('/')
+        val exists = providers.any { provider ->
+            provider.id == LOCAL_CORE_PROVIDER_ID ||
+                provider.name.equals(LOCAL_CORE_PROVIDER_NAME, ignoreCase = true) ||
+                provider.baseUrl.trim().trimEnd('/') == factoryBaseUrl
+        }
+        if (exists) return
+        persistAiProviders(normalizeAiProviders(providers + defaultLocalCoreProvider()))
+    }
+
+    /**
+     * 升级补齐：老安装已种入的默认 LLM 供应商请求头为空时，按注册表出厂值补一次。
+     * 只补与出厂默认供应商同名且请求头为空的项；注册表无出厂值（开源构建）时为无操作。
+     * 标志打过后不再改写，用户之后清空请求头保持清空。
+     */
+    private fun fillDefaultAiHeadersIfNeeded() {
+        if (appCtx.getPrefBoolean(PreferKey.aiLlmBuiltinHeadersFilled)) return
+        appCtx.putPrefBoolean(PreferKey.aiLlmBuiltinHeadersFilled, true)
+        val headers = AiBuiltinDefaults.llmHeaders()
+        if (headers.isBlank()) return
+        val providers = GSON.fromJsonArray<AiProviderConfig>(
+            appCtx.getPrefString(PreferKey.aiProviderList)
+        ).getOrDefault(emptyList())
+        val target = providers.firstOrNull {
+            it.name == DEFAULT_AI_PROVIDER_NAME && it.headers.isNullOrBlank()
+        } ?: return
+        persistAiProviders(
+            providers.map { if (it.id == target.id) it.copy(headers = headers) else it }
+        )
     }
 
     private fun resolveAiProviderName(baseUrl: String): String {
@@ -1826,6 +1543,35 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     val readAloudHideFloatingWindow
         get() = appCtx.getPrefBoolean(PreferKey.readAloudHideFloatingWindow, true)
+
+    // 无字幕音频书直接进入沉浸式听书页（AudioPlayActivity），默认开启
+    val audioBookDirectAudioPlayNoSubtitle
+        get() = appCtx.getPrefBoolean(PreferKey.audioBookDirectAudioPlayNoSubtitle, true)
+
+    // 所有音频书直接进入沉浸式听书页，默认关闭，优先级高于无字幕规则
+    val audioBookDirectAudioPlayAll
+        get() = appCtx.getPrefBoolean(PreferKey.audioBookDirectAudioPlayAll, false)
+
+    // 经以上规则进入听书页后自动开始播放，默认关闭
+    val audioBookDirectAudioPlayAutoPlay
+        get() = appCtx.getPrefBoolean(PreferKey.audioBookDirectAudioPlayAutoPlay, false)
+
+    // 朗读悬浮窗在阅读界面外（应用内其他界面）显示，默认开启
+    val readAloudFloatingOutsideReader
+        get() = appCtx.getPrefBoolean(PreferKey.readAloudFloatingOutsideReader, true)
+
+    // AI 创作悬浮窗在阅读界面外显示，默认开启
+    val aiCreationFloatingOutsideReader
+        get() = appCtx.getPrefBoolean(PreferKey.aiCreationFloatingOutsideReader, true)
+
+    const val DEFAULT_AI_CREATION_FLOATING_AUTO_CLOSE_SECONDS = 30
+
+    // AI 创作悬浮窗任务完成后自动关闭秒数；值为空/非数字/非正数=不自动关闭
+    val aiCreationFloatingAutoCloseSeconds: Int?
+        get() = appCtx.getPrefString(
+            PreferKey.aiCreationFloatingAutoCloseSeconds,
+            DEFAULT_AI_CREATION_FLOATING_AUTO_CLOSE_SECONDS.toString()
+        )?.trim()?.takeIf { it.isNotEmpty() }?.toIntOrNull()?.takeIf { it > 0 }
 
     val readAloudHidePlaybackPanel
         get() = appCtx.getPrefBoolean(PreferKey.readAloudHidePlaybackPanel, false)

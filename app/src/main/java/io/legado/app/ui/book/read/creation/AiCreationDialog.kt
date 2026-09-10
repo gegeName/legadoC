@@ -4,6 +4,7 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.content.DialogInterface
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -26,11 +27,15 @@ import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.databinding.DialogAiCreationBinding
 import io.legado.app.databinding.ItemAiPreviewBinding
 import io.legado.app.help.ai.AI_CREATION_EPHEMERAL_BOOK
+import io.legado.app.help.ai.AI_CREATION_LLM_INPUT_KEY
 import io.legado.app.help.ai.AI_CREATION_IMAGE_COUNT_KEY
 import io.legado.app.help.ai.AI_CREATION_MODE_KEY
+import io.legado.app.help.ai.AiCreationCardImages
 import io.legado.app.help.ai.AiCreationConfig
 import io.legado.app.help.ai.AiCreationHelper
 import io.legado.app.help.ai.AiCreationImageFile
+import io.legado.app.help.ai.AiCreationInsertStash
+import io.legado.app.help.ai.AiCreationImageMarkers
 import io.legado.app.help.ai.AiCreationImageSlot
 import io.legado.app.help.ai.AiCreationImageSlotState
 import io.legado.app.help.ai.AiCreationImageTaskHolder
@@ -45,7 +50,7 @@ import io.legado.app.lib.dialogs.selector
 import io.legado.app.lib.theme.accentColor
 import io.legado.app.lib.theme.backgroundColor
 import io.legado.app.lib.theme.primaryTextColor
-import io.legado.app.ui.code.CodeEditActivity
+import io.legado.app.ui.code.CreationCardEditActivity
 import io.legado.app.ui.widget.text.AccentTextView
 import io.legado.app.utils.gone
 import io.legado.app.utils.sendToClip
@@ -53,12 +58,17 @@ import io.legado.app.utils.setLayout
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import io.legado.app.utils.visible
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
-    AiCreationLibraryDialog.OnCardsAddedListener {
+    AiCreationLibraryDialog.OnCardsAddedListener, AiCreationRefPhotoDialog.CallBack {
 
     companion object {
         const val ARG_BOOK_NAME = "bookName"
@@ -80,7 +90,7 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
     private var variableGroups: List<AiCreationVariableGroup> = emptyList()
     private var currentPage = 0
     private var generating = false
-    private var suppressPromptWatcher = false
+    private var suppressTextWatcher = false
     private var pendingGenerateAfterPrompt = false
     private var previewPageSize = 1
     private var previewPage = 0
@@ -100,6 +110,13 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
         if (currentPage == 1) {
             rebuildSections()
         }
+    }
+
+    private val llmImagePicker = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri ?: return@registerForActivityResult
+        importLlmImage(uri)
     }
 
     override fun onStart() {
@@ -129,22 +146,30 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
 
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
         session.bookName = bookName
-        val imageDefinition = AiCreationConfig.imageDefinition
-        val videoDefinition = AiCreationConfig.videoDefinition
+        if (savedInstanceState == null) {
+            //下框最终提示词与 LLM 返回只限当前这次生产：新进入创作界面即清空，不残留上次结果
+            session.prompt = ""
+            session.llmOutput = ""
+        }
+        //变量区 = LLM 变量（style，控制发给 LLM 的内容）+ 供应商生图/生视频参数
+        val imageVariables = AiCreationConfig.imageLlmDefinition.variables +
+            AiCreationConfig.imageVariables
+        val videoVariables = AiCreationConfig.videoLlmDefinition.variables +
+            AiCreationConfig.videoVariables
         variableGroups = listOf(
             AiCreationVariableGroup(
                 key = AiCreationVariables.GROUP_IMAGE,
                 label = "图片",
-                variables = imageDefinition.variables
+                variables = imageVariables
             ),
             AiCreationVariableGroup(
                 key = AiCreationVariables.GROUP_VIDEO,
                 label = "视频",
-                variables = videoDefinition.variables
+                variables = videoVariables
             )
         )
         require(variableGroups.all { it.variables.isNotEmpty() }) {
-            "图片和视频供应商的变量定义都不能为空"
+            "图片和视频的 LLM 变量与供应商变量都不能为空"
         }
         //首次使用选图片；已存模式必须是当前新体系的合法值。
         val savedMode = session.paramValue(AI_CREATION_MODE_KEY)
@@ -165,11 +190,7 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
         binding.ivBack.setOnClickListener { onBack() }
         binding.tvAction.setOnClickListener { onAction() }
         binding.tvClear.setOnClickListener {
-            if (currentPage == 2) {
-                copyPrompt()
-            } else {
-                confirmClear()
-            }
+            confirmClear()
         }
         binding.btnGenerateImage.setOnClickListener { onGenerateImageClicked() }
         binding.tvGridOne.setOnClickListener {
@@ -240,8 +261,19 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
                 upInDialogFloating()
             }
         }
-        binding.etPrompt.addTextChangedListener { text ->
-            if (!suppressPromptWatcher) {
+        binding.tvManual.setOnClickListener { showPage(4) }
+        binding.tvCopyLlmInput.setOnClickListener { copyLlmInput() }
+        binding.tvCopyPrompt.setOnClickListener { copyPrompt() }
+        binding.tvClearLlmInput.setOnClickListener { clearLlmInputBox() }
+        binding.tvClearPrompt.setOnClickListener { clearPromptBox() }
+        binding.tvSaveLlmImages.setOnClickListener { saveLlmImagesToAlbum() }
+        binding.etLlmInput.addTextChangedListener { text ->
+            if (!suppressTextWatcher) {
+                session.manualLlmInput = text?.toString().orEmpty()
+            }
+        }
+        binding.etManualPrompt.addTextChangedListener { text ->
+            if (!suppressTextWatcher) {
                 session.prompt = text?.toString().orEmpty()
             }
         }
@@ -284,19 +316,23 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
         }
     }
 
-    //左上角返回只在创作体系四页内逐页回退，不退出界面；
+    //左上角返回只在创作体系各页内回退，不退出界面；提示词页入口在组合素材页，返回也回组合素材页；
+    //预览页返回回提示词页（页面体系无 page 2，禁止按页号减一跳到不存在的页）；
     //界面关闭（叉叉/系统返回键）才销毁临时卡片，回预览走生成任务悬浮窗
     private fun onBack() {
-        if (currentPage > 0) {
-            showPage(currentPage - 1)
+        when (currentPage) {
+            0 -> Unit
+            3 -> showPage(4)
+            4 -> showPage(1)
+            else -> showPage(currentPage - 1)
         }
     }
 
     private fun onAction() {
         when (currentPage) {
             0 -> showPage(1)
-            1 -> generatePrompt()
-            2 -> generatePrompt()
+            1 -> showPage(4)
+            4 -> generatePromptFromLlmInput()
         }
     }
 
@@ -313,49 +349,69 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
         currentPage = page
         binding.llModePage.visibility = if (page == 0) View.VISIBLE else View.GONE
         binding.svComposePage.visibility = if (page == 1) View.VISIBLE else View.GONE
-        binding.llPromptPage.visibility = if (page == 2) View.VISIBLE else View.GONE
+        binding.llManualPage.visibility = if (page == 4) View.VISIBLE else View.GONE
         binding.llPreviewPage.visibility = if (page == 3) View.VISIBLE else View.GONE
         binding.bottomBar.visibility = if (page == 3) View.GONE else View.VISIBLE
         binding.ivBack.visibility = if (page > 0) View.VISIBLE else View.GONE
         binding.tvTitle.setText(
             when (page) {
                 1 -> R.string.ai_creation_compose
-                2 -> R.string.ai_creation_prompt_title
                 3 -> R.string.ai_creation_preview_title
+                4 -> R.string.ai_creation_prompt_title
                 else -> R.string.ai_creation
             }
         )
         val isVideo = isVideoMode()
-        binding.etImageCount.visibility = if (page == 2) View.VISIBLE else View.GONE
+        binding.etImageCount.visibility = if (page == 4) View.VISIBLE else View.GONE
         binding.etImageCount.setText(
             session.paramValue(AI_CREATION_IMAGE_COUNT_KEY) ?: "1"
         )
-        binding.btnGenerateImage.visibility = if (page == 2) View.VISIBLE else View.GONE
+        binding.btnGenerateImage.visibility =
+            if (page == 4) View.VISIBLE else View.GONE
         binding.btnGenerateImage.setText(
             if (isVideo) R.string.ai_creation_generate_video else R.string.ai_creation_generate_image
         )
-        binding.tvClear.setText(
-            if (page == 2) R.string.ai_creation_copy_prompt else R.string.ai_creation_clear
-        )
-        binding.tvClear.visibility = when {
-            page == 1 -> View.VISIBLE
-            page == 2 && !isVideo -> View.VISIBLE
-            else -> View.GONE
+        binding.tvClear.setText(R.string.ai_creation_clear)
+        binding.tvClear.visibility = if (page == 1) View.VISIBLE else View.GONE
+        //提示词页底栏两端对齐：生成提示词贴左（左缘12dp靠按钮自带内边距），
+        //生成图片+数字框贴右（数字框右缘12dp），图片按钮与数字框之间10dp；其他页保持原右对齐不动。
+        binding.bottomSpacer.visibility = if (page == 4) View.VISIBLE else View.GONE
+        if (page == 4) {
+            binding.bottomBar.setPadding(
+                0,
+                binding.bottomBar.paddingTop,
+                dp(12),
+                binding.bottomBar.paddingBottom
+            )
+        } else {
+            binding.bottomBar.setPadding(
+                dp(16),
+                binding.bottomBar.paddingTop,
+                dp(16),
+                binding.bottomBar.paddingBottom
+            )
         }
+        binding.tvManual.visibility = if (page == 1) View.VISIBLE else View.GONE
+        binding.tvAction.visibility = if (page == 1) View.GONE else View.VISIBLE
         binding.tvAction.setText(
             when (page) {
-                1 -> R.string.ai_creation_generate_prompt
-                2 -> R.string.ai_creation_generate_prompt
+                4 -> R.string.ai_creation_generate_prompt
                 else -> R.string.ai_creation_next
             }
         )
         if (page == 1) {
             rebuildSections()
         }
-        if (page == 2 && session.prompt.isNotBlank()) {
-            suppressPromptWatcher = true
-            binding.etPrompt.setText(session.prompt)
-            suppressPromptWatcher = false
+        if (page == 4) {
+            suppressTextWatcher = true
+            binding.etManualPrompt.setText(session.prompt)
+            binding.etLlmInput.setText(session.manualLlmInput)
+            suppressTextWatcher = false
+            refreshLlmImageStrip()
+            //从未手动编辑过LLM输入时按当前卡片重新汇总预填；编辑过则保留用户快照
+            if (session.manualLlmInput.isBlank()) {
+                prefillLlmInput()
+            }
         }
         if (page == 3) {
             previewPage = 0
@@ -376,14 +432,32 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
         host.update(show = state.shouldShow, taskRunning = state.taskRunning)
     }
 
+    private fun isLlmVariable(variable: AiCreationVariable): Boolean {
+        val definition = if (isVideoMode()) {
+            AiCreationConfig.videoLlmDefinition
+        } else {
+            AiCreationConfig.imageLlmDefinition
+        }
+        return definition.variables.any { it.key == variable.key }
+    }
+
+    /** LLM 变量存 LLM 存储（不随供应商），供应商变量存供应商隔离存储 */
     private fun currentParamValue(variable: AiCreationVariable): String {
         val mode = currentGroup()?.key ?: error("AI 创作模式未选择")
-        return variable.effectiveValue(session.providerVariableValue(mode, variable.key))
+        return if (isLlmVariable(variable)) {
+            variable.effectiveValue(session.llmVariableValue(mode, variable.key))
+        } else {
+            variable.effectiveValue(session.providerVariableValue(mode, variable.key))
+        }
     }
 
     private fun setCurrentParamValue(variable: AiCreationVariable, value: String) {
         val mode = currentGroup()?.key ?: error("AI 创作模式未选择")
-        session.setProviderVariable(mode, variable.key, value)
+        if (isLlmVariable(variable)) {
+            session.setLlmVariable(mode, variable.key, value)
+        } else {
+            session.setProviderVariable(mode, variable.key, value)
+        }
     }
 
     private fun buildVariableControls(group: AiCreationVariableGroup) {
@@ -719,61 +793,265 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
     }
 
     private fun openCardEditor(cardId: Long) {
-        val intent = Intent(requireContext(), CodeEditActivity::class.java).apply {
+        val intent = Intent(requireContext(), CreationCardEditActivity::class.java).apply {
             putExtra("creationCardId", cardId)
         }
         cardEditLauncher.launch(intent)
     }
 
-    private fun generatePrompt() {
+    /** 提示词页：用上框LLM输入文本生成提示词，结果自动填入下框并记入会话 llmOutput（工作流中间大段，下框二次编辑不覆盖它）；若是下框为空触发的连带生成，拿到后直接续发生成 */
+    private fun generatePromptFromLlmInput() {
         if (generating) return
-        val cardIds = AiCreationConfig.sectionOrder
-            .flatMap { session.itemsOf(it) }
-            .map { it.cardId }
-            .distinct()
-        if (cardIds.isEmpty()) {
-            toastOnUi(R.string.ai_creation_select_card_first)
+        val llmInput = binding.etLlmInput.text?.toString()?.trim().orEmpty()
+        if (llmInput.isEmpty()) {
+            pendingGenerateAfterPrompt = false
+            toastOnUi(R.string.ai_creation_llm_input_empty)
             return
         }
+        session.manualLlmInput = llmInput
         generating = true
         binding.rotateLoading.visible()
         binding.tvAction.setText(R.string.ai_creation_generating)
         viewLifecycleOwner.lifecycleScope.launch {
             val result = runCatching {
-                val cardsById = withContext(IO) {
-                    cardIds.mapNotNull { appDb.creationCardDao.getById(it) }
-                        .associateBy { it.cardId }
-                }
                 withContext(IO) {
-                    AiCreationHelper.generatePrompt(session, cardsById)
+                    AiCreationHelper.generatePromptFromLlmInput(session, llmInput)
                 }
             }
             generating = false
+            //视图已销毁时直接退出：不吞取消异常冒泡，也不触 binding（getView 为空会崩）
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            if (!isAdded || view == null) return@launch
+            ensureActive()
             binding.rotateLoading.inVisible()
             binding.tvAction.setText(R.string.ai_creation_generate_prompt)
             result.onSuccess { prompt ->
                 session.prompt = prompt
+                suppressTextWatcher = true
+                binding.etManualPrompt.setText(prompt)
+                suppressTextWatcher = false
                 if (pendingGenerateAfterPrompt) {
                     pendingGenerateAfterPrompt = false
-                    startGeneration(prompt)
-                } else {
-                    showPage(2)
+                    validateAndStartGeneration(prompt)
                 }
             }.onFailure { throwable ->
                 pendingGenerateAfterPrompt = false
-                binding.tvAction.setText(R.string.ai_creation_generate_prompt)
                 toastOnUi(throwable.message ?: throwable.javaClass.simpleName)
             }
         }
     }
 
-    private fun onGenerateImageClicked() {
-        val prompt = binding.etPrompt.text?.toString()?.trim().orEmpty()
-        if (prompt.isEmpty()) {
-            pendingGenerateAfterPrompt = true
-            generatePrompt()
+    /** 提示词页LLM输入预填：卡片汇总成素材再经统一入口渲染成完整LLM输入；用户已编辑则保留快照 */
+    private fun prefillLlmInput() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val result = runCatching {
+                withContext(IO) {
+                    val cardIds = AiCreationConfig.sectionOrder
+                        .flatMap { session.itemsOf(it) }
+                        .map { it.cardId }
+                        .distinct()
+                    val cardsById = cardIds.mapNotNull { appDb.creationCardDao.getById(it) }
+                        .associateBy { it.cardId }
+                    val material = session.buildMaterialText(cardsById)
+                    AiCreationHelper.buildLlmInput(session, material)
+                }
+            }
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            if (!isAdded || view == null) return@launch
+            ensureActive()
+            result.onSuccess { text ->
+                if (currentPage == 4 && session.manualLlmInput.isBlank()) {
+                    suppressTextWatcher = true
+                    binding.etLlmInput.setText(text)
+                    suppressTextWatcher = false
+                    refreshLlmImageStrip()
+                }
+            }.onFailure { throwable ->
+                toastOnUi(throwable.message ?: throwable.javaClass.simpleName)
+            }
+        }
+    }
+
+    /** 上框图片条：每张图一个编号圈（①②③）+×删除；末尾固定“+”格加图，提示词页无图也显示以便加第一张 */
+    private fun refreshLlmImageStrip() {
+        val strip = binding.llLlmImageStrip
+        strip.removeAllViews()
+        val refs = session.materialImageRefs
+        binding.hsLlmImages.visibility =
+            if (refs.isEmpty() && currentPage != 4) View.GONE else View.VISIBLE
+        refs.forEachIndexed { index, _ ->
+            strip.addView(llmImageCell(index + 1))
+        }
+        if (currentPage == 4) {
+            strip.addView(llmImageAddCell())
+        }
+    }
+
+    /** 图片条末尾“+”格：与编号圈同款圆圈样式，点击选图导入并在光标处插入标记 */
+    private fun llmImageAddCell(): View {
+        return TextView(requireContext()).apply {
+            text = "+"
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setTextColor(context.accentColor)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setStroke(dp(1), context.accentColor)
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply {
+                setMargins(dp(4), 0, dp(4), 0)
+            }
+            setOnClickListener { llmImagePicker.launch("image/*") }
+        }
+    }
+
+    /** 导入图片到提示词页：文件入库、追加图片集合，标记插入上框光标处（无光标则追加末尾） */
+    private fun importLlmImage(uri: Uri) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val ref = withContext(IO) { AiCreationCardImages.import(uri, "prompt") }
+            if (ref == null) {
+                toastOnUi(R.string.creation_image_import_failed)
+                return@launch
+            }
+            session.materialImageRefs = session.materialImageRefs + ref
+            val marker = AiCreationImageMarkers.markerOf(session.materialImageRefs.size)
+            val editView = binding.etLlmInput
+            val current = editView.text?.toString().orEmpty()
+            var pos = editView.selectionEnd
+            if (pos < 0 || pos > current.length) pos = current.length
+            val updated = current.substring(0, pos) + marker + current.substring(pos)
+            suppressTextWatcher = true
+            editView.setText(updated)
+            editView.setSelection(pos + marker.length)
+            session.manualLlmInput = updated
+            suppressTextWatcher = false
+            refreshLlmImageStrip()
+        }
+    }
+
+    private fun llmImageCell(number: Int): View {
+        val cell = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(4), dp(2), dp(4), dp(2))
+        }
+        cell.addView(
+            TextView(requireContext()).apply {
+                text = circledNumber(number)
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setTextColor(context.accentColor)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setStroke(dp(1), context.accentColor)
+                }
+                layoutParams = LinearLayout.LayoutParams(dp(30), dp(30))
+                setOnClickListener { showRefPreview(number - 1) }
+            }
+        )
+        cell.addView(
+            TextView(requireContext()).apply {
+                text = "×"
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#80808080"))
+                setPadding(dp(4), dp(1), dp(4), 0)
+                setOnClickListener { deleteLlmImage(number - 1) }
+            }
+        )
+        return cell
+    }
+
+    private fun circledNumber(number: Int): String {
+        if (number in 1..20) {
+            return (0x2460 + number - 1).toChar().toString()
+        }
+        return "($number)"
+    }
+
+    private fun showRefPreview(index: Int) {
+        AiCreationRefPhotoDialog.newInstance(
+            session.materialImageRefs,
+            index,
+            deletable = true
+        ).show(childFragmentManager, "creationRefPhoto")
+    }
+
+    /** 删图操作程序收尾：从图片集合摘除该图，上框删对应标记并把后面的编号整体前移 */
+    override fun onDeleteRefPhoto(index: Int) {
+        deleteLlmImage(index)
+    }
+
+    private fun deleteLlmImage(index: Int) {
+        val refs = session.materialImageRefs.toMutableList()
+        if (index !in refs.indices) return
+        refs.removeAt(index)
+        session.materialImageRefs = refs
+        val deletedNumber = index + 1
+        val text = binding.etLlmInput.text?.toString().orEmpty()
+        val updated = AiCreationImageMarkers.REGEX.replace(text) { match ->
+            val number = match.groupValues[1].toIntOrNull()
+            when {
+                number == null -> match.value
+                number == deletedNumber -> ""
+                number > deletedNumber -> AiCreationImageMarkers.markerOf(number - 1)
+                else -> match.value
+            }
+        }
+        suppressTextWatcher = true
+        binding.etLlmInput.setText(updated)
+        session.manualLlmInput = updated
+        suppressTextWatcher = false
+        refreshLlmImageStrip()
+    }
+
+    /** 一键按顺序保存全部图片到相册：文件名 = 序号-到秒时间戳，与标记对应 */
+    private fun saveLlmImagesToAlbum() {
+        val refs = session.materialImageRefs
+        if (refs.isEmpty()) {
+            toastOnUi(R.string.ai_creation_images_empty)
             return
         }
+        val stamp = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(Date())
+        val context = requireContext()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val saved = withContext(IO) {
+                refs.mapIndexed { index, ref ->
+                    val name = "${index + 1}-$stamp.${ref.substringAfterLast('.')}"
+                    AiCreationCardImages.saveToAlbum(context, ref, name)
+                }.count { it }
+            }
+            toastOnUi(getString(R.string.ai_creation_images_saved, saved, refs.size))
+        }
+    }
+
+    private fun onGenerateImageClicked() {
+        //提示词页只用下框内容；下框为空时先自动生成提示词、拿到后直接续发；
+        //上框即本次 LLM 输入，直接生成不经过 LLM 时也如实记入溯源，不用残留旧值
+        val prompt = binding.etManualPrompt.text?.toString()?.trim().orEmpty()
+        if (prompt.isEmpty()) {
+            pendingGenerateAfterPrompt = true
+            generatePromptFromLlmInput()
+            return
+        }
+        validateAndStartGeneration(prompt)
+    }
+
+    /** 点生成图片时验证下框：标记 vs 图片集合（悬空、重号、跳号错哪指哪）；通过即发起生成 */
+    private fun validateAndStartGeneration(prompt: String) {
+        runCatching {
+            AiCreationHelper.validateMarkers(prompt, session.materialImageRefs)
+        }.onFailure { throwable ->
+            toastOnUi(throwable.message ?: throwable.javaClass.simpleName)
+            return
+        }
+        session.prompt = prompt
+        val llmInput = binding.etLlmInput.text?.toString()?.trim().orEmpty()
+        session.manualLlmInput = llmInput
+        //上框只记按下瞬间的快照，禁止改成“最后一次实际发送优先”：调 LLM 后改上框可能是故意
+        //（拿去外部用再贴回），应用断不清用户意图；快照保证屏幕上有啥文件里有啥，
+        //静默丢弃可见状态比它与 llmOutput 错配更坏，错配是用户自己写进文件的，对得上看得出来。
+        session.setParam(AI_CREATION_LLM_INPUT_KEY, llmInput)
         startGeneration(prompt)
     }
 
@@ -791,10 +1069,20 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
         session.setParam(AI_CREATION_IMAGE_COUNT_KEY, count.toString())
         viewLifecycleOwner.lifecycleScope.launch {
             val result = runCatching {
-                val definition = AiCreationConfig.videoDefinition
-                val values = AiCreationHelper.buildRequestValues(session, definition.variables)
-                AiCreationImageTaskHolder.startVideo(prompt, count, values)
+                val providerVariables = AiCreationConfig.videoVariables
+                val values = AiCreationHelper.buildRequestValues(session, providerVariables)
+                AiCreationImageTaskHolder.startVideo(
+                    prompt,
+                    count,
+                    values,
+                    session.paramValue(AI_CREATION_LLM_INPUT_KEY).orEmpty(),
+                    session.materialImageRefs.toList(),
+                    session.llmOutput
+                )
             }
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            if (!isAdded || view == null) return@launch
+            ensureActive()
             result.onSuccess {
                 showPage(3)
             }.onFailure { throwable ->
@@ -809,11 +1097,21 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
         session.setParam(AI_CREATION_IMAGE_COUNT_KEY, count.toString())
         viewLifecycleOwner.lifecycleScope.launch {
             val result = runCatching {
-                val definition = AiCreationConfig.imageDefinition
-                val values = AiCreationHelper.buildRequestValues(session, definition.variables)
+                val providerVariables = AiCreationConfig.imageVariables
+                val values = AiCreationHelper.buildRequestValues(session, providerVariables)
                 AiCreationConfig.requireImageApiReady()
-                AiCreationImageTaskHolder.start(prompt, count, values)
+                AiCreationImageTaskHolder.start(
+                    prompt,
+                    count,
+                    values,
+                    session.paramValue(AI_CREATION_LLM_INPUT_KEY).orEmpty(),
+                    session.materialImageRefs.toList(),
+                    session.llmOutput
+                )
             }
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            if (!isAdded || view == null) return@launch
+            ensureActive()
             result.onSuccess {
                 showPage(3)
             }.onFailure { throwable ->
@@ -939,16 +1237,12 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
                 .show(childFragmentManager, "creationPhoto")
         }
         ivPhoto.setOnLongClickListener {
-            val ok = AiCreationImageFile.saveToAlbum(requireContext(), slot.fileName)
-            toastOnUi(
-                if (ok) R.string.illustration_saved_to_album
-                else R.string.illustration_save_failed
-            )
+            showSlotSaveMenu(slot.fileName)
             true
         }
     }
 
-    /** 视频槽位：首帧做缩略图，点击内置播放器播放，长按保存到相册 */
+    /** 视频槽位：首帧做缩略图，点击内置播放器播放，长按弹保存菜单 */
     private fun bindVideoResult(
         itemBinding: ItemAiPreviewBinding,
         slot: AiCreationImageSlot
@@ -987,23 +1281,98 @@ class AiCreationDialog : BaseDialogFragment(R.layout.dialog_ai_creation),
                 .show(childFragmentManager, "creationPhoto")
         }
         ivPhoto.setOnLongClickListener {
-            val ok = AiCreationImageFile.saveToAlbum(requireContext(), slot.fileName)
-            toastOnUi(
-                if (ok) R.string.illustration_saved_to_album
-                else R.string.illustration_save_failed
-            )
+            showSlotSaveMenu(slot.fileName)
             true
         }
     }
 
+    /** 生成结果长按菜单：保存到相册、保存工作流、复制工作流、插入正文；图片视频同一菜单 */
+    private fun showSlotSaveMenu(fileName: String) {
+        requireContext().selector(
+            AiCreationImageFile.fileOf(fileName).name,
+            listOf(
+                getString(R.string.illustration_save_to_album),
+                getString(R.string.ai_creation_save_workflow),
+                getString(R.string.ai_creation_copy_workflow),
+                getString(R.string.ai_creation_insert)
+            )
+        ) { _, _, which ->
+            when (which) {
+                0 -> saveSlotToAlbum(fileName)
+                1 -> exportWorkflow(fileName)
+                2 -> copyWorkflow(fileName)
+                else -> AiCreationInsertStash.stashWithToast(requireContext(), listOf(fileName))
+            }
+        }
+    }
+
+    private fun saveSlotToAlbum(fileName: String) {
+        val ok = AiCreationImageFile.saveToAlbum(requireContext(), fileName)
+        toastOnUi(
+            if (ok) R.string.illustration_saved_to_album
+            else R.string.illustration_save_failed
+        )
+    }
+
+    private fun exportWorkflow(fileName: String) {
+        val json = AiCreationImageFile.readWorkflowJson(fileName)
+        if (json == null) {
+            toastOnUi(R.string.ai_creation_workflow_missing)
+            return
+        }
+        val context = requireContext()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val ok = withContext(IO) {
+                AiCreationImageFile.saveWorkflowToDownloads(context, fileName, json)
+            }
+            toastOnUi(
+                if (ok) R.string.ai_creation_workflow_saved
+                else R.string.ai_creation_workflow_save_failed
+            )
+        }
+    }
+
+    private fun copyWorkflow(fileName: String) {
+        val json = AiCreationImageFile.readWorkflowJson(fileName)
+        if (json == null) {
+            toastOnUi(R.string.ai_creation_workflow_missing)
+            return
+        }
+        requireContext().sendToClip(json)
+        toastOnUi(R.string.ai_creation_workflow_copied)
+    }
+
+    /** 提示词页下框复制：复制最终提示词；只做复制，不做其他动作 */
     private fun copyPrompt() {
-        val prompt = binding.etPrompt.text?.toString()?.trim().orEmpty()
+        val prompt = binding.etManualPrompt.text?.toString()?.trim().orEmpty()
         if (prompt.isEmpty()) {
             toastOnUi(R.string.ai_creation_prompt_empty)
             return
         }
         session.prompt = prompt
         requireContext().sendToClip(prompt)
+        toastOnUi(R.string.ai_creation_copied)
+    }
+
+    /** 提示词页上框清空：只清上框LLM输入；下框不动 */
+    private fun clearLlmInputBox() {
+        binding.etLlmInput.setText("")
+    }
+
+    /** 提示词页下框清空：只清下框最终提示词；上框不动 */
+    private fun clearPromptBox() {
+        binding.etManualPrompt.setText("")
+    }
+
+    /** 提示词页上框复制：复制上框LLM输入；只做复制，不做其他动作 */
+    private fun copyLlmInput() {
+        val llmInput = binding.etLlmInput.text?.toString()?.trim().orEmpty()
+        if (llmInput.isEmpty()) {
+            toastOnUi(R.string.ai_creation_llm_input_empty)
+            return
+        }
+        session.manualLlmInput = llmInput
+        requireContext().sendToClip(llmInput)
         toastOnUi(R.string.ai_creation_copied)
     }
 

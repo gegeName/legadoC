@@ -28,6 +28,7 @@ class HomepageModuleEditDialog : BaseDialogFragment(R.layout.dialog_homepage_mod
 
     private var selectedType: String = HomepageModuleType.Grid.key
 
+    /** 模块类型不分单选多选：任意分类数量（1~N 个 tab）都可选全部类型 */
     private val typeEntries: List<HomepageModuleType>
         get() = HomepageModuleType.entries.filter { it != HomepageModuleType.Unknown }
 

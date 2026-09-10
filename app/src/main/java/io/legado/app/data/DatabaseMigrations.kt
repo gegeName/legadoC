@@ -36,7 +36,27 @@ object DatabaseMigrations {
             migration_112_113,
             migration_113_114,
             migration_114_115,
+            migration_115_116,
+            migration_116_117,
         )
+    }
+
+    private val migration_116_117 = object : Migration(116, 117) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // 配图每图备注（宫格多图各写各的，排版与备注解构）
+            db.execSQL(
+                "ALTER TABLE book_illustrations ADD COLUMN srcNotes TEXT NOT NULL DEFAULT '{}'"
+            )
+        }
+    }
+
+    private val migration_115_116 = object : Migration(115, 116) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // 配图备注（Markdown 文本）
+            db.execSQL(
+                "ALTER TABLE book_illustrations ADD COLUMN note TEXT NOT NULL DEFAULT ''"
+            )
+        }
     }
 
     private val migration_114_115 = object : Migration(114, 115) {

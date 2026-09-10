@@ -10,6 +10,9 @@ const val AI_CREATION_EPHEMERAL_BOOK = "\u0000ephemeral"
 const val AI_CREATION_MODE_KEY = "mode"
 const val AI_CREATION_IMAGE_COUNT_KEY = "imageCount"
 
+/** 工作流溯源：最近一次渲染后发给 LLM 的完整输入（不经 LLM 生成时为空串） */
+const val AI_CREATION_LLM_INPUT_KEY = "llmInput"
+
 data class AiCreationVariable(
     val key: String,
     val label: String,
@@ -41,13 +44,13 @@ data class AiCreationVariable(
         else -> true
     }
 
-    /** 缺省时采用定义默认值；已有值不合法直接暴露配置错误。 */
+    /**
+     * 缺省或存量值失效（定义变更后的过期参数记忆）时采用定义默认值；
+     * 参数记忆是可过期的用户偏好而非配置，不得因存量值不匹配而崩溃。
+     */
     fun effectiveValue(stored: String?): String {
-        val value = stored ?: defaultValue
-        require(accepts(value)) {
-            "AI 创作变量 $key 的当前值无效：$value"
-        }
-        return value
+        if (stored != null && accepts(stored)) return stored
+        return defaultValue
     }
 }
 
@@ -64,15 +67,27 @@ data class AiCreationRoute(
 )
 
 data class AiCreationVariableDoc(
-    val variables: List<AiCreationVariable>? = null,
-    val routes: List<AiCreationRoute>? = null,
-    val finalPrompt: String? = null
+    val variables: List<AiCreationVariable>? = null
 )
 
+/**
+ * LLM 变量设置的一节：style 变量 + 提示词路由 + LLM 输入模板，
+ * 三者共同决定发给 LLM 的内容，与图片/视频供应商无关；
+ * markerRule 是有图时路由追加的提示词库条目名（告诉模型保留标记），空表示不追加。
+ */
 data class AiCreationDefinition(
     val variables: List<AiCreationVariable>,
     val routes: List<AiCreationRoute>,
-    val finalPrompt: String
+    val llmInputTemplate: String,
+    val markerRule: String? = null
+)
+
+/**
+ * 全局 LLM 变量设置：image/video 两节各自独立（style 选项、路由目标、输入模板都不同）。
+ */
+data class AiCreationLlmVariableDoc(
+    val image: AiCreationDefinition? = null,
+    val video: AiCreationDefinition? = null
 )
 
 object AiCreationVariables {
@@ -80,11 +95,17 @@ object AiCreationVariables {
     const val GROUP_IMAGE = "image"
     const val GROUP_VIDEO = "video"
 
-    private const val IMAGE_FINAL_PROMPT =
+    /** 有图时路由追加的提示词库条目：告诉模型原样保留图片标记 */
+    const val MARKER_RULE_PROMPT = "图片标记规则"
+
+    /** 图片标记规则出厂正文：纯静态文本，条数由代码校验，不占位 */
+    const val MARKER_RULE_TEXT = "返回的提示词须原样保留全部【图片N】标记，一个不能少；标记放在改写后提示词中该图片语义对应的位置。"
+
+    private const val IMAGE_LLM_INPUT_TEMPLATE =
         "根据素材生成绘画提示词。\n生成要求：\n\${prompt}\n素材：\n\${素材}"
-    private const val VIDEO_FINAL_PROMPT =
+    private const val VIDEO_LLM_INPUT_TEMPLATE =
         "根据素材生成视频提示词。\n生成要求：\n\${prompt}\n素材：\n\${素材}"
-    private val FINAL_PROMPT_VARIABLE = Regex("\\$\\{([^{}]+)\\}")
+    private val LLM_INPUT_TEMPLATE_VARIABLE = Regex("\\$\\{([^{}]+)\\}")
     private val DOUBLE_BRACED_PLACEHOLDER = Regex("\\{\\{[^{}]+\\}\\}")
 
     //图片 style：只控制提示词路由（连环画/单场景），默认单场景
@@ -151,8 +172,8 @@ object AiCreationVariables {
         offValue = "false",
     )
 
+    //智谱 CogView 生图参数变量（style 属于 LLM 变量设置，不在此列）
     private val cogViewImageVariables = listOf(
-        imageStyleVariable,
         cogViewSizeVariable,
         cogViewQualityVariable,
         cogViewWatermarkVariable
@@ -201,14 +222,146 @@ object AiCreationVariables {
         defaultValue = "7.5",
     )
 
-    /** 硅基流动 Kolors 版图片组（供内置硅基流动供应商组装变量定义） */
+    //硅基随机种子：填数字=每次出固定图，不填=每次随机（请求时填真随机数，不发空串）
+    private val kolorsSeedVariable = AiCreationVariable(
+        key = "seed",
+        label = "随机种子",
+        format = AiCreationVariable.FORMAT_INPUT,
+        defaultValue = "",
+    )
+
+    /** 硅基流动 Kolors 生图参数变量（style 属于 LLM 变量设置，不在此列） */
     val kolorsImageVariables = listOf(
-        imageStyleVariable,
         kolorsImageSizeVariable,
         kolorsNegativePromptVariable,
         kolorsStepsVariable,
-        kolorsGuidanceVariable
+        kolorsGuidanceVariable,
+        kolorsSeedVariable
     )
+
+    //Local Dream 采样器枚举（与客户端 SchedulerNames 一致，values 存纯 API 值）
+    private val localDreamSchedulerVariable = AiCreationVariable(
+        key = "scheduler",
+        label = "采样器",
+        format = AiCreationVariable.FORMAT_OPTIONS,
+        options = listOf(
+            "DPM++ 2M（dpm）",
+            "DPM++ 2M Karras（dpm_karras）",
+            "Euler（euler）",
+            "Euler Karras（euler_karras）",
+            "Euler A（euler_a）",
+            "Euler A Karras（euler_a_karras）",
+            "DPM++ 2M SDE（dpm_sde）",
+            "DPM++ 2M SDE Karras（dpm_sde_karras）",
+            "LCM（lcm）"
+        ),
+        values = listOf(
+            "dpm",
+            "dpm_karras",
+            "euler",
+            "euler_karras",
+            "euler_a",
+            "euler_a_karras",
+            "dpm_sde",
+            "dpm_sde_karras",
+            "lcm"
+        ),
+        defaultValue = "euler",
+    )
+
+    //Local Dream 本地后端参数：默认值取自 Anima NPU 模型（/models defaults + 真机实测）：
+    //模型 generation_size=1024，文生图引擎固定出 1024 方图；图生图按请求宽高跑（输入图须等尺寸）
+    private val localDreamWidthVariable = AiCreationVariable(
+        key = "width",
+        label = "宽",
+        format = AiCreationVariable.FORMAT_INPUT,
+        defaultValue = "1024",
+    )
+
+    private val localDreamHeightVariable = AiCreationVariable(
+        key = "height",
+        label = "高",
+        format = AiCreationVariable.FORMAT_INPUT,
+        defaultValue = "1024",
+    )
+
+    private val localDreamStepsVariable = AiCreationVariable(
+        key = "steps",
+        label = "推理步数",
+        format = AiCreationVariable.FORMAT_INPUT,
+        defaultValue = "10",
+    )
+
+    private val localDreamCfgVariable = AiCreationVariable(
+        key = "cfg",
+        label = "引导系数",
+        format = AiCreationVariable.FORMAT_INPUT,
+        defaultValue = "1",
+    )
+
+    //重绘幅度只在图生图生效（文生图后端忽略或按 1.0 处理）
+    private val localDreamDenoiseVariable = AiCreationVariable(
+        key = "denoise_strength",
+        label = "重绘幅度",
+        format = AiCreationVariable.FORMAT_INPUT,
+        defaultValue = "0.6",
+    )
+
+    //画面比例仅 SDXL/Anima 后端生效（1024 固定画布裁剪出非方图），SD1.5 后端忽略此字段；
+    //默认空值=不发字段（渲染引擎空即省略），按后端默认方图处理
+    private val localDreamAspectRatioVariable = AiCreationVariable(
+        key = "aspect_ratio",
+        label = "画面比例",
+        format = AiCreationVariable.FORMAT_OPTIONS,
+        options = listOf(
+            "方图（后端默认）",
+            "3:2（横）",
+            "2:3（竖）",
+            "4:3（横）",
+            "3:4（竖）",
+            "16:9（横）",
+            "9:16（竖）",
+            "21:9（横）"
+        ),
+        values = listOf(
+            "",
+            "3:2",
+            "2:3",
+            "4:3",
+            "3:4",
+            "16:9",
+            "9:16",
+            "21:9"
+        ),
+        defaultValue = "",
+    )
+
+    //OpenCL 加速仅 MNN CPU 后端（部分模型）有效，QNN/NPU 后端忽略
+    private val localDreamOpenClVariable = AiCreationVariable(
+        key = "use_opencl",
+        label = "OpenCL 加速",
+        format = AiCreationVariable.FORMAT_SWITCH,
+        defaultValue = "false",
+        onValue = "true",
+        offValue = "false",
+    )
+
+    /** Local Dream 生图参数变量（style 属于 LLM 变量设置，不在此列） */
+    val localDreamImageVariables = listOf(
+        localDreamSchedulerVariable,
+        localDreamAspectRatioVariable,
+        localDreamWidthVariable,
+        localDreamHeightVariable,
+        localDreamStepsVariable,
+        localDreamCfgVariable,
+        localDreamDenoiseVariable,
+        localDreamOpenClVariable,
+        kolorsNegativePromptVariable,
+        kolorsSeedVariable
+    )
+
+    /** Local Dream 供应商的出厂变量定义（供初始配置与恢复默认）。 */
+    val localDreamImageVariablesJson: String by lazy { buildImageJson(localDreamImageVariables) }
 
     //视频供应商按智谱 CogVideoX 官方参数定义；key 统一加 video_ 前缀保证全局唯一
     private val zhipuVideoParameters = listOf(
@@ -267,10 +420,17 @@ object AiCreationVariables {
             defaultValue = "5",
             onValue = "10",
             offValue = "5",
+        ),
+        //视频请求编号：填了就用填的，不填每次自动生成唯一号（请求时填真值，不发空串）
+        AiCreationVariable(
+            key = "request_id",
+            label = "请求编号",
+            format = AiCreationVariable.FORMAT_INPUT,
+            defaultValue = "",
         )
     )
 
-    //图片路由：写在图片供应商变量定义 JSON 里，按 style 选择提示词模板 key。
+    //图片路由：写在 LLM 变量设置的 image 节，按 style 选择提示词模板 key。
     private val imageRoutes = listOf(
         AiCreationRoute(
             conditions = mapOf("style" to "连环画"),
@@ -282,7 +442,7 @@ object AiCreationVariables {
         )
     )
 
-    //视频路由：写在视频供应商变量定义 JSON 里，按 style 选择提示词模板 key。
+    //视频路由：写在 LLM 变量设置的 video 节，按 style 选择提示词模板 key。
     private val videoRoutes = listOf(
         AiCreationRoute(
             conditions = mapOf("style" to "多镜头"),
@@ -294,25 +454,41 @@ object AiCreationVariables {
         )
     )
 
-    /** 智谱 CogView 图片供应商的默认变量定义：变量 + 图片路由 + LLM 最终提示词。 */
-    val defaultJson: String by lazy { buildImageJson(cogViewImageVariables) }
-
     /**
-     * 组装图片供应商变量定义 JSON：变量由供应商提供，路由选全局纯文本，
-     * finalPrompt 组装后才发送 LLM。
+     * 供应商变量定义 JSON：只装生图/生视频参数变量；
+     * LLM 变量、路由与输入模板在全局 LLM 变量设置，与供应商无关。
      */
     fun buildImageJson(imageVariables: List<AiCreationVariable>): String {
+        return GSON.toJson(AiCreationVariableDoc(variables = imageVariables))
+    }
+
+    /** 全局 LLM 变量设置的出厂 JSON：image/video 两节，各含 style、路由、输入模板与有图标记规则。 */
+    fun buildLlmDefaultJson(): String {
         return GSON.toJson(
-            AiCreationVariableDoc(
-                variables = imageVariables,
-                routes = imageRoutes,
-                finalPrompt = IMAGE_FINAL_PROMPT
+            AiCreationLlmVariableDoc(
+                image = AiCreationDefinition(
+                    variables = listOf(imageStyleVariable),
+                    routes = imageRoutes,
+                    llmInputTemplate = IMAGE_LLM_INPUT_TEMPLATE,
+                    markerRule = MARKER_RULE_PROMPT
+                ),
+                video = AiCreationDefinition(
+                    variables = listOf(videoStyleVariable),
+                    routes = videoRoutes,
+                    llmInputTemplate = VIDEO_LLM_INPUT_TEMPLATE,
+                    markerRule = MARKER_RULE_PROMPT
+                )
             )
         )
     }
 
-    private val zhipuVideoVariables = listOf(videoStyleVariable) +
-        zhipuVideoParameters +
+    /**
+     * 智谱 CogView 图片供应商的出厂变量定义（供初始配置与恢复默认）。
+     */
+    val defaultJson: String by lazy { buildImageJson(cogViewImageVariables) }
+
+    //智谱 CogVideoX 生视频参数变量（style 属于 LLM 变量设置，不在此列）
+    private val zhipuVideoVariables = zhipuVideoParameters +
         AiCreationVariable(
         key = "watermark_enabled",
         label = "水印",
@@ -322,20 +498,34 @@ object AiCreationVariables {
         offValue = "false",
     )
 
-    /** 视频供应商的变量定义：变量 + 视频路由 + LLM 最终提示词，与图片体系完全独立。 */
+    /** 智谱视频供应商的出厂变量定义（供初始配置与恢复默认）。 */
     val zhipuVideoVariablesJson: String by lazy { buildVideoVariablesJson(zhipuVideoVariables) }
 
     private fun buildVideoVariablesJson(variables: List<AiCreationVariable>): String {
-        return GSON.toJson(
-            AiCreationVariableDoc(
-                variables = variables,
-                routes = videoRoutes,
-                finalPrompt = VIDEO_FINAL_PROMPT
-            )
-        )
+        return GSON.toJson(AiCreationVariableDoc(variables = variables))
     }
 
-    fun parse(json: String): AiCreationDefinition {
+    /**
+     * 旧格式残留指纹：供应商变量定义里带 routes/finalPrompt 顶层字段，
+     * 或 variables 里含已搬去 LLM 变量设置的 style。
+     * 命中才允许自动回出厂；其他解析错误一律是用户自己的问题，原样报错。
+     * 自灭式：回出厂后指纹消失，此路以后永远走不到（编辑框校验拦着，老格式存不进来）。
+     */
+    fun isLegacyVariablesJson(json: String): Boolean {
+        val raw = runCatching { JSONObject(json) }.getOrNull() ?: return false
+        if (raw.has("routes") || raw.has("finalPrompt")) return true
+        val variables = raw.optJSONArray("variables") ?: return false
+        for (index in 0 until variables.length()) {
+            if (variables.optJSONObject(index)?.optString("key") == "style") return true
+        }
+        return false
+    }
+
+    /**
+     * 解析供应商变量定义 JSON：只认 variables（生图/生视频参数）。
+     * 旧格式字段与 LLM 变量一律报错暴露，不做任何兼容。
+     */
+    fun parse(json: String): List<AiCreationVariable> {
         val raw = try {
             JSONObject(json)
         } catch (throwable: Throwable) {
@@ -352,37 +542,112 @@ object AiCreationVariables {
                 }
             }
         }
-        raw.optJSONArray("routes")?.let { routes ->
-            for (index in 0 until routes.length()) {
-                val route = routes.optJSONObject(index) ?: continue
-                require(!route.has("template")) {
-                    "AI 创作路由只使用 prompt（提示词名字）字段"
-                }
+        listOf("routes", "finalPrompt", "llmInputTemplate", "image", "video").forEach { key ->
+            require(!raw.has(key)) {
+                "AI 创作变量定义不支持 $key；变量定义只含生图/生视频参数，LLM 变量在 LLM 变量设置"
             }
         }
         val doc = GSON.fromJsonObject<AiCreationVariableDoc>(json).getOrNull()
             ?: throw IllegalStateException("AI 创作变量定义 JSON 无效：无法解析")
-        val variables = requireNotNull(doc.variables) { "AI 创作变量定义缺少 variables" }
-        val routes = requireNotNull(doc.routes) { "AI 创作变量定义缺少 routes（没有路由就无法选择提示词）" }
-        val finalPrompt = requireNotNull(doc.finalPrompt) {
-            "AI 创作变量定义缺少 finalPrompt（发送给 LLM 的最终提示词）"
+        val variables = normalizeVariables(
+            requireNotNull(doc.variables) { "AI 创作变量定义缺少 variables" }
+        )
+        require(variables.none { it.key == "style" }) {
+            "AI 创作变量定义不支持 style；style 属于 LLM 变量设置"
         }
-        require(finalPrompt.isNotBlank()) { "AI 创作变量定义的 finalPrompt 不能为空" }
-        val finalPromptVariables = FINAL_PROMPT_VARIABLE.findAll(finalPrompt)
+        return variables
+    }
+
+    /**
+     * 解析全局 LLM 变量设置 JSON：image/video 两节，各含 style 变量、
+     * 提示词路由与 LLM 输入模板。
+     */
+    fun parseLlm(json: String): AiCreationLlmVariableDoc {
+        val raw = try {
+            JSONObject(json)
+        } catch (throwable: Throwable) {
+            throw IllegalStateException("LLM 变量设置 JSON 无效：${throwable.message}", throwable)
+        }
+        listOf("routes", "finalPrompt").forEach { key ->
+            require(!raw.has(key)) {
+                "LLM 变量设置不支持顶层 $key；LLM 变量按 image/video 分节"
+            }
+        }
+        val doc = GSON.fromJsonObject<AiCreationLlmVariableDoc>(json).getOrNull()
+            ?: throw IllegalStateException("LLM 变量设置 JSON 无效：无法解析")
+        val image = requireNotNull(doc.image) { "LLM 变量设置缺少 image 节" }
+        val video = requireNotNull(doc.video) { "LLM 变量设置缺少 video 节" }
+        validateLlmSection(image, "图片", listOf("连环画", "单场景"), "单场景")
+        validateLlmSection(video, "视频", listOf("多镜头", "单镜头"), "单镜头")
+        return doc
+    }
+
+    private fun validateLlmSection(
+        section: AiCreationDefinition,
+        label: String,
+        styleOptions: List<String>,
+        styleDefault: String
+    ) {
+        val variables = normalizeVariables(
+            requireNotNull(section.variables) { "${label} LLM 变量缺少 variables" }
+        )
+        val style = variables.singleOrNull { it.key == "style" }
+            ?: throw IllegalStateException("${label} LLM 变量必须且只能有一个 style")
+        require(style.format == AiCreationVariable.FORMAT_OPTIONS) {
+            "${label} style 必须是选项式变量"
+        }
+        require(style.options == styleOptions && style.effectiveValues() == styleOptions) {
+            "${label} style 选项必须是：${styleOptions.joinToString("、")}"
+        }
+        require(style.defaultValue == styleDefault) {
+            "${label} style 默认值必须是：${styleDefault}"
+        }
+        val routes = requireNotNull(section.routes) {
+            "${label} LLM 变量缺少 routes（没有路由就无法选择提示词）"
+        }
+        styleOptions.forEach { styleValue ->
+            val matches = routes.filter { it.conditions == mapOf("style" to styleValue) }
+            require(matches.size == 1) {
+                "${label} LLM 变量缺少 style=${styleValue} 的提示词路由"
+            }
+        }
+        require(routes.size == styleOptions.size) {
+            "${label} LLM 变量的提示词路由只能由 style 决定"
+        }
+        routes.forEach { route ->
+            require(route.prompt.isNotBlank()) { "AI 创作路由缺少 prompt（提示词名字）" }
+            route.conditions.forEach { (key, value) ->
+                require(key == "style") {
+                    "AI 创作路由（→ ${route.prompt}）when 引用了未定义的变量：$key"
+                }
+                require(value.isNotBlank()) {
+                    "AI 创作路由（→ ${route.prompt}）when 的 $key 取值为空"
+                }
+            }
+        }
+        val template = requireNotNull(section.llmInputTemplate) {
+            "${label} LLM 变量缺少 llmInputTemplate（发送给 LLM 的输入模板）"
+        }
+        require(template.isNotBlank()) { "${label} LLM 变量的 llmInputTemplate 不能为空" }
+        val templateVariables = LLM_INPUT_TEMPLATE_VARIABLE.findAll(template)
             .map { it.groupValues[1] }
             .toList()
         require(
-            finalPromptVariables.size == 2 &&
-                finalPromptVariables.toSet() == setOf("prompt", "素材")
+            templateVariables.size == 2 &&
+                templateVariables.toSet() == setOf("prompt", "素材")
         ) {
-            "AI 创作变量定义的 finalPrompt 必须且只能各包含一次 \${prompt} 和 \${素材}"
+            "${label} LLM 变量的 llmInputTemplate 必须且只能各包含一次 \${prompt} 和 \${素材}"
         }
-        require(!DOUBLE_BRACED_PLACEHOLDER.containsMatchIn(finalPrompt)) {
-            "AI 创作变量定义的 finalPrompt 不支持 {{名字}} 占位符"
+        require(!DOUBLE_BRACED_PLACEHOLDER.containsMatchIn(template)) {
+            "${label} LLM 变量的 llmInputTemplate 不支持 {{名字}} 占位符"
         }
-        require(variables.isNotEmpty()) { "AI 创作变量定义 variables 不能为空" }
+    }
+
+    /** 变量通用校验与归一化：key/format/options/switch 规则对供应商与 LLM 变量同样适用。 */
+    private fun normalizeVariables(variables: List<AiCreationVariable>): List<AiCreationVariable> {
+        require(variables.isNotEmpty()) { "AI 创作变量 variables 不能为空" }
         val keys = mutableSetOf<String>()
-        val normalizedVariables = variables.map { variable ->
+        return variables.map { variable ->
             //GSON 反射解析对缺失字段不应用 Kotlin 默认值，这里统一归一到定义默认值。
             val normalized = variable.copy(
                 values = variable.values.orEmpty(),
@@ -424,21 +689,6 @@ object AiCreationVariables {
             require(keys.add(normalized.key)) { "AI 创作变量 key 重复：${normalized.key}" }
             normalized
         }
-        routes.forEach { route ->
-            require(route.prompt.isNotBlank()) { "AI 创作路由缺少 prompt（提示词名字）" }
-            require(route.conditions.isNotEmpty()) {
-                "AI 创作路由（→ ${route.prompt}）缺少 when 条件"
-            }
-            route.conditions.forEach { (key, value) ->
-                require(key in keys) {
-                    "AI 创作路由（→ ${route.prompt}）when 引用了未定义的变量：$key"
-                }
-                require(value.isNotBlank()) {
-                    "AI 创作路由（→ ${route.prompt}）when 的 $key 取值为空"
-                }
-            }
-        }
-        return AiCreationDefinition(normalizedVariables, routes, finalPrompt)
     }
 }
 
@@ -446,6 +696,16 @@ data class CreationSectionItem(
     val cardId: Long,
     val section: String
 )
+
+/**
+ * AI 创作多模态编号标记：【图片N】与 materialImageRefs[N-1] 一一对应。
+ * 全篇统一阿拉伯数字，编号由程序按首次出现顺序统一完成。
+ */
+object AiCreationImageMarkers {
+    val REGEX = Regex("【图片(\\d+)】")
+
+    fun markerOf(index: Int): String = "【图片$index】"
+}
 
 /**
  * 连线的对象是分区（素材类型），不是分区里的卡片：
@@ -477,6 +737,21 @@ class AiCreationSession {
 
     var prompt: String = ""
 
+    /** 提示词页上框LLM输入编辑快照：空表示尚未编辑过，进入提示词页时按卡片重新汇总预填 */
+    var manualLlmInput: String = ""
+
+    /**
+     * 最近一次 LLM 返回：只由 LLM 调用写入，下框二次编辑或手填不覆盖；
+     * 工作流中间大段如实取它，下框终稿另记 prompt，两者各记各的。
+     */
+    var llmOutput: String = ""
+
+    /**
+     * 上框图片集合：【图片N】对应 refs[N-1]，由 buildMaterialText 按首次出现顺序编号。
+     * 标记与集合是发送与校验的唯一数据源；删标记=对应图片不发，删图=程序收尾重排。
+     */
+    var materialImageRefs: List<String> = emptyList()
+
     fun paramValue(key: String): String? = params[key]
 
     /** 参数唯一写入口：写内存的同时持久化，应用重启后仍保留上次值 */
@@ -487,7 +762,7 @@ class AiCreationSession {
 
     /**
      * 供应商变量按“图片/视频体系 + 当前供应商 + 变量 key”独立存储。
-     * 同名 style 在图片与视频中、或不同供应商中，绝不共享值。
+     * 同名参数在不同供应商中绝不共享值；只存生图/生视频参数。
      */
     fun providerVariableValue(mode: String, key: String): String? =
         params[providerVariableStorageKey(mode, key)]
@@ -506,6 +781,18 @@ class AiCreationSession {
             else -> error("未知 AI 创作模式：$mode")
         } ?: error("AI 创作${if (mode == AiCreationVariables.GROUP_IMAGE) "图片" else "视频"}供应商未配置")
         return "provider:$mode:$providerId:$key"
+    }
+
+    /**
+     * LLM 变量按“体系 + 变量 key”存储：LLM 变量设置全局一份，不随供应商变化，
+     * 与供应商变量的存储互相独立。
+     */
+    fun llmVariableValue(mode: String, key: String): String? =
+        params["llm:$mode:$key"]
+
+    fun setLlmVariable(mode: String, key: String, value: String) {
+        params["llm:$mode:$key"] = value
+        AiCreationConfig.saveCreationParams(params)
     }
 
     fun itemsOf(section: String): MutableList<CreationSectionItem> =
@@ -576,6 +863,9 @@ class AiCreationSession {
         linkGroups.clear()
         pendingLink = null
         prompt = ""
+        manualLlmInput = ""
+        llmOutput = ""
+        materialImageRefs = emptyList()
         //清空即恢复出厂参数记忆，持久层一并清掉
         AiCreationConfig.saveCreationParams(emptyMap())
     }
@@ -589,6 +879,11 @@ class AiCreationSession {
         else -> section
     }
 
+    /**
+     * 组合素材文本：卡片内容按分区/连线组拼接，
+     * 其中的图片引用按首次出现顺序统一编号为【图片N】（同一文件多处出现复用同一标记），
+     * 文本与图片就此分离，编号与 [materialImageRefs] 一一对应。
+     */
     fun buildMaterialText(cardsById: Map<Long, CreationCard>): String {
         val builder = StringBuilder()
         val emittedSections = mutableSetOf<String>()
@@ -610,7 +905,22 @@ class AiCreationSession {
                 appendSectionContents(builder, sections, cardsById)
             }
         }
-        return builder.toString().trim()
+        return replaceImagesWithMarkers(builder.toString().trim())
+    }
+
+    /** 素材里的图片引用按出现顺序编号；编号结果与集合同步落在 materialImageRefs */
+    private fun replaceImagesWithMarkers(material: String): String {
+        val refs = mutableListOf<String>()
+        val indexByRef = mutableMapOf<String, Int>()
+        val marked = AiCreationCardImages.replaceMarkdownRefs(material) { ref ->
+            val index = indexByRef.getOrPut(ref) {
+                refs.add(ref)
+                refs.size
+            }
+            AiCreationImageMarkers.markerOf(index)
+        }
+        materialImageRefs = refs
+        return marked
     }
 
     private fun appendSectionContents(

@@ -1,5 +1,6 @@
 package io.legado.app.ui.book.cache
 
+import android.content.Intent
 import android.os.Bundle
 import android.graphics.Color
 import android.view.Gravity
@@ -22,7 +23,9 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.CreationResult
 import io.legado.app.databinding.ActivityCacheManageBinding
 import io.legado.app.help.AppWebDav
+import io.legado.app.help.CacheManager
 import io.legado.app.help.ai.AiCreationImageFile
+import io.legado.app.help.ai.AiCreationInsertStash
 import io.legado.app.help.cache.CacheCoordinator
 import io.legado.app.help.cache.CacheLifecycle
 import io.legado.app.help.cache.CacheTaskStatus
@@ -35,9 +38,11 @@ import io.legado.app.lib.theme.UiCorner
 import io.legado.app.lib.theme.accentColor
 import io.legado.app.lib.theme.primaryTextColor
 import io.legado.app.ui.book.read.creation.AiCreationPhotoDialog
+import io.legado.app.ui.code.CodeEditActivity
 import io.legado.app.utils.applyNavigationBarMargin
 import io.legado.app.utils.applyNavigationBarPadding
 import io.legado.app.utils.gone
+import io.legado.app.utils.sendToClip
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.startActivityForBook
 import io.legado.app.utils.toastOnUi
@@ -355,6 +360,59 @@ class CacheManageActivity :
                     R.string.illustration_save_failed
                 }
             )
+        }
+    }
+
+    private fun saveWorkflowSelection() {
+        val selected = creationItems.filter { it.resultId in creationSelection }
+        lifecycleScope.launch {
+            var exported = 0
+            var missing = 0
+            selected.forEach { item ->
+                val json = withContext(Dispatchers.IO) {
+                    AiCreationImageFile.readWorkflowJson(item.fileName)
+                }
+                val ok = if (json == null) {
+                    false
+                } else {
+                    withContext(Dispatchers.IO) {
+                        AiCreationImageFile.saveWorkflowToDownloads(
+                            this@CacheManageActivity,
+                            item.fileName,
+                            json
+                        )
+                    }
+                }
+                if (ok) exported++ else missing++
+            }
+            val message = getString(R.string.cache_manage_workflow_exported, exported)
+            if (missing > 0) {
+                toastOnUi(message + getString(R.string.cache_manage_workflow_missing_part, missing))
+            } else {
+                toastOnUi(message)
+            }
+        }
+    }
+
+    private fun copyWorkflowSelection() {
+        val selected = creationItems.filter { it.resultId in creationSelection }
+        lifecycleScope.launch {
+            val entries = selected.mapNotNull { item ->
+                val json = withContext(Dispatchers.IO) {
+                    AiCreationImageFile.readWorkflowJson(item.fileName)
+                } ?: return@mapNotNull null
+                runCatching {
+                    org.json.JSONObject()
+                        .put("fileName", item.fileName)
+                        .put("workflow", org.json.JSONObject(json))
+                }.getOrNull()
+            }
+            if (entries.isEmpty()) {
+                toastOnUi(R.string.ai_creation_workflow_missing)
+                return@launch
+            }
+            sendToClip(org.json.JSONArray(entries).toString())
+            toastOnUi(R.string.ai_creation_workflow_copied)
         }
     }
 
@@ -704,14 +762,49 @@ class CacheManageActivity :
             listOf(
                 getString(R.string.cache_manage_upload),
                 getString(R.string.illustration_save_to_album),
+                getString(R.string.ai_creation_save_workflow),
+                getString(R.string.ai_creation_copy_workflow),
+                getString(R.string.ai_creation_view_workflow),
+                getString(R.string.ai_creation_insert),
                 getString(R.string.delete)
             )
         ) { _, _, index ->
             when (index) {
                 0 -> uploadCreationSelection()
                 1 -> saveCreationSelection()
-                2 -> deleteCreationSelection()
+                2 -> saveWorkflowSelection()
+                3 -> copyWorkflowSelection()
+                4 -> viewCreationWorkflow(item.fileName)
+                5 -> AiCreationInsertStash.stashWithToast(
+                    this,
+                    creationItems.filter { it.resultId in creationSelection }.map { it.fileName }
+                )
+                else -> deleteCreationSelection()
             }
+        }
+    }
+
+    /** 查看工作流：只读全屏文本（脱敏 JSON，无 base64），跟查看备注同一个样子 */
+    private fun viewCreationWorkflow(fileName: String) {
+        lifecycleScope.launch {
+            val json = withContext(Dispatchers.IO) {
+                AiCreationImageFile.readWorkflowJson(fileName)
+            }
+            if (json.isNullOrBlank()) {
+                toastOnUi(R.string.ai_creation_workflow_missing)
+                return@launch
+            }
+            val cacheKey = "creation_workflow_${System.currentTimeMillis()}"
+            CacheManager.putMemory(cacheKey, json)
+            startActivity(
+                Intent(this@CacheManageActivity, CodeEditActivity::class.java).apply {
+                    putExtra("cacheKey", cacheKey)
+                    putExtra("title", getString(R.string.ai_creation_view_workflow))
+                    // textmate/languages.json 只注册了 source.js / text.html.basic / text.html.markdown，
+                    // JSON 工作流复用 source.js 高亮，禁止传未注册的 source.json
+                    putExtra("languageName", "source.js")
+                }
+            )
         }
     }
 

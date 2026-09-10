@@ -2,8 +2,13 @@ package io.legado.app.ui.book.read.config
 
 import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.recyclerview.widget.LinearLayoutManager
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
@@ -18,18 +23,26 @@ import io.legado.app.databinding.ItemImageSimpleBinding
 import io.legado.app.help.illustration.IllustrationAnchor
 import io.legado.app.help.illustration.IllustrationHelp
 import io.legado.app.help.illustration.imageSrcsToJson
+import io.legado.app.help.ai.AiCreationImageFile
+import io.legado.app.help.ai.AiCreationInsertStash
+import io.legado.app.help.ai.AiCreationMediaMetadata
 import io.legado.app.lib.theme.applyUiBodyTypefaceDeep
 import io.legado.app.lib.theme.primaryColor
 import io.legado.app.lib.theme.uiTypeface
 import io.legado.app.model.ReadBook
 import io.legado.app.utils.SelectImagesContract
+import io.legado.app.utils.dpToPx
+import io.legado.app.utils.getCompatColor
 import io.legado.app.utils.setLayout
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.visible
 import io.legado.app.utils.viewbindingdelegate.viewBinding
+import org.json.JSONObject
 
 /**
- * 插入媒体对话框：选择图片、视频或音频，设置显示高度、布局、独占一页。
+ * 插入媒体对话框：选择图片、视频或音频，设置显示高度、布局、独占一页、备注。
+ * 备注默认统一填写（本次插入的所有记录共用）；取消"统一备注"后按媒体逐条填写，
+ * 排版只管显示分组，不管备注条数，两者解构。
  */
 class IllustrationEditDialog() : BaseDialogFragment(R.layout.dialog_illustration_edit, true) {
 
@@ -41,6 +54,13 @@ class IllustrationEditDialog() : BaseDialogFragment(R.layout.dialog_illustration
             putString("backParagraph", anchor.backParagraph)
         }
     }
+
+    /** 成组单元：firstIndex 为单元内第一个媒体的下标，indexes 为单元包含的媒体下标 */
+    private data class MediaUnit(
+        val firstIndex: Int,
+        val indexes: List<Int>,
+        val isAudio: Boolean
+    )
 
     private val binding by viewBinding(DialogIllustrationEditBinding::bind)
     private val anchor by lazy {
@@ -54,11 +74,61 @@ class IllustrationEditDialog() : BaseDialogFragment(R.layout.dialog_illustration
 
     private val selectedUris = arrayListOf<Uri>()
 
+    // 选择时统一读取字节并解析类型，保存与逐条备注分组共用这份结果
+    private val parsedMedia = arrayListOf<Pair<ByteArray, String>>() // bytes to ext
+
+    // 与 parsedMedia 平行索引：各媒体内嵌的工作流 JSON 原文（无元数据为 null）
+    private val parsedWorkflows = arrayListOf<String?>()
+
+    private val unitNoteEdits = arrayListOf<EditText>()
+    private val unitKeys = arrayListOf<Int>()
+    private val unitNotes = LinkedHashMap<Int, String>() // 媒体下标 -> 备注（排版只管显示分组，不管备注）
+
     private val selectImages = registerForActivityResult(SelectImagesContract()) {
         if (it.uris.isNotEmpty()) {
+            val parsed = arrayListOf<Pair<ByteArray, String>>()
+            it.uris.forEach { uri ->
+                // 选择器放开 */* 后可能选到非媒体文件，先统一读取字节并解析类型
+                val bytes = kotlin.runCatching {
+                    requireContext().contentResolver.openInputStream(uri)?.use { s ->
+                        s.readBytes()
+                    }
+                }.getOrNull()
+                if (bytes == null || bytes.isEmpty()) {
+                    toastOnUi("读取媒体文件失败")
+                    return@forEach
+                }
+                // 文件选择器返回的 MIME 可能不可靠（null/octet-stream/报成 image 类），
+                // 按文件名扩展名 → MIME → 文件头嗅探三级判断，确保视频/音频不会落成 jpg
+                val name = IllustrationHelp.queryDisplayName(requireContext(), uri)
+                val mime = requireContext().contentResolver.getType(uri)
+                val ext = IllustrationHelp.resolveMediaExt(name, mime, bytes)
+                if (ext !in IllustrationHelp.VIDEO_EXTS &&
+                    ext !in IllustrationHelp.AUDIO_EXTS &&
+                    ext !in IllustrationHelp.IMAGE_EXTS
+                ) {
+                    toastOnUi("仅支持图片、视频、音频文件")
+                    return@forEach
+                }
+                parsed.add(bytes to ext)
+            }
+            if (parsed.size != it.uris.size) {
+                // 有媒体读取或解析失败：本次选择整体不生效，直接暴露问题
+                return@registerForActivityResult
+            }
             selectedUris.clear()
             selectedUris.addAll(it.uris)
+            parsedMedia.clear()
+            parsedMedia.addAll(parsed)
+            parsedWorkflows.clear()
+            parsedWorkflows.addAll(
+                parsed.map { (bytes, _) ->
+                    //AI 创作生成的文件自带工作流元数据（PNG 文本块 / MP4 meta box），按签名读取
+                    runCatching { AiCreationMediaMetadata.readWorkflowJson(bytes) }.getOrNull()
+                }
+            )
             upSelected()
+            rebuildNoteInputs()
         }
     }
 
@@ -89,6 +159,52 @@ class IllustrationEditDialog() : BaseDialogFragment(R.layout.dialog_illustration
             save()
         }
         binding.rgLayout.check(binding.rbSingle.id)
+        //排版只管显示分组，不管备注条数：切排版不重建备注输入
+        binding.cbUnifiedNote.isChecked = false
+        binding.cbUnifiedNote.setOnCheckedChangeListener { _, _ ->
+            rebuildNoteInputs()
+        }
+        prefillStashedMedia()
+        rebuildNoteInputs()
+    }
+
+    /**
+     * 暂存预填：别处长按点的"插入"攒在这里，开弹窗就把媒体装进来（只看不拿，等插完再清）；
+     * 内嵌工作流照读，备注预填走后面统一逻辑；文件没了整批作废并明说。
+     */
+    private fun prefillStashedMedia() {
+        val stashed = AiCreationInsertStash.peek()
+        if (stashed.isEmpty()) return
+        val parsed = arrayListOf<Pair<ByteArray, String>>()
+        val workflows = arrayListOf<String?>()
+        val uris = arrayListOf<Uri>()
+        stashed.forEach { name ->
+            val file = AiCreationImageFile.fileOf(name)?.takeIf { it.isFile } ?: return@forEach
+            val bytes = runCatching { file.readBytes() }.getOrNull()
+            if (bytes == null || bytes.isEmpty()) return@forEach
+            val ext = name.substringAfterLast('.', "").lowercase()
+            if (ext !in IllustrationHelp.VIDEO_EXTS &&
+                ext !in IllustrationHelp.AUDIO_EXTS &&
+                ext !in IllustrationHelp.IMAGE_EXTS
+            ) {
+                return@forEach
+            }
+            parsed.add(bytes to ext)
+            workflows.add(runCatching { AiCreationMediaMetadata.readWorkflowJson(bytes) }.getOrNull())
+            uris.add(Uri.fromFile(file))
+        }
+        if (parsed.isEmpty()) {
+            AiCreationInsertStash.clear()
+            toastOnUi(R.string.ai_creation_stash_gone)
+            return
+        }
+        selectedUris.clear()
+        selectedUris.addAll(uris)
+        parsedMedia.clear()
+        parsedMedia.addAll(parsed)
+        parsedWorkflows.clear()
+        parsedWorkflows.addAll(workflows)
+        upSelected()
     }
 
     private fun upSelected() {
@@ -116,8 +232,142 @@ class IllustrationEditDialog() : BaseDialogFragment(R.layout.dialog_illustration
         }
     }
 
+    /**
+     * 成组单元与保存时的记录一一对应：图片/视频按所选布局分块，音频永不参与宫格单独成格；
+     * 各块按原始选择顺序排序（音频夹在宫格区间内时排在宫格块之后）。
+     */
+    private fun computeUnits(): List<MediaUnit> {
+        val cellCount = layoutCellCount()
+        val units = arrayListOf<MediaUnit>()
+        parsedMedia.mapIndexedNotNull { index, m ->
+            if (m.second in IllustrationHelp.AUDIO_EXTS) null else index
+        }.chunked(cellCount).forEach { chunk ->
+            units.add(MediaUnit(chunk.first(), chunk, false))
+        }
+        parsedMedia.forEachIndexed { index, m ->
+            if (m.second in IllustrationHelp.AUDIO_EXTS) {
+                units.add(MediaUnit(index, listOf(index), true))
+            }
+        }
+        units.sortBy { it.firstIndex }
+        return units
+    }
+
+    private fun snapshotUnitNotes() {
+        unitNoteEdits.forEachIndexed { i, edit ->
+            unitKeys.getOrNull(i)?.let { key ->
+                unitNotes[key] = edit.text.toString()
+            }
+        }
+    }
+
+    /** 备注输入区：统一备注勾选时单个输入框；取消勾选后按媒体逐条输入（与排版无关） */
+    private fun rebuildNoteInputs() {
+        snapshotUnitNotes()
+        val unified = binding.cbUnifiedNote.isChecked
+        binding.etNote.visibility = if (unified) View.VISIBLE else View.GONE
+        binding.llNoteItems.visibility = if (unified) View.GONE else View.VISIBLE
+        binding.llNoteItems.removeAllViews()
+        unitNoteEdits.clear()
+        unitKeys.clear()
+        if (unified) {
+            //自带工作流元数据的媒体：预填内嵌工作流 JSON 完整原文，仅填空备注，不覆盖用户已输入内容
+            if (binding.etNote.text.isNullOrBlank()) {
+                firstWorkflowJson()?.let { binding.etNote.setText(it) }
+            }
+            return
+        }
+        val context = requireContext()
+        //一媒体一条：四宫格 4 张图就是 4 条备注，排版只决定显示分组，不合并备注
+        parsedMedia.forEachIndexed { mediaIndex, m ->
+            //每条备注默认收成一行：点预览展开输入，点标题收起；有 workflow 的各读各的
+            val initial = unitNotes[mediaIndex] ?: workflowJsonOf(mediaIndex).orEmpty()
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                val rowParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                rowParams.topMargin = 12.dpToPx()
+                layoutParams = rowParams
+            }
+            val label = TextView(context).apply {
+                text = if (m.second in IllustrationHelp.AUDIO_EXTS) {
+                    getString(R.string.illustration_note_audio_unit, mediaIndex + 1)
+                } else {
+                    getString(R.string.illustration_note_image_unit, mediaIndex + 1, 1)
+                }
+                setTextColor(context.getCompatColor(R.color.primaryText))
+                textSize = 14f
+            }
+            val preview = TextView(context).apply {
+                text = previewTextOf(initial)
+                setTextColor(context.getCompatColor(R.color.secondaryText))
+                textSize = 14f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                isClickable = true
+                isFocusable = true
+            }
+            val edit = EditText(context).apply {
+                hint = getString(R.string.illustration_note_hint)
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                gravity = Gravity.TOP or Gravity.START
+                background = null
+                setTextColor(context.getCompatColor(R.color.primaryText))
+                textSize = 14f
+                setText(initial)
+                visibility = View.GONE
+            }
+            preview.setOnClickListener { expandNoteRow(preview, edit) }
+            label.setOnClickListener { toggleNoteRow(preview, edit) }
+            row.addView(label)
+            row.addView(preview)
+            row.addView(edit)
+            binding.llNoteItems.addView(row)
+            unitNoteEdits.add(edit)
+            unitKeys.add(mediaIndex)
+        }
+        binding.llNoteItems.applyUiBodyTypefaceDeep(context.uiTypeface())
+    }
+
+    /** 备注收起行：取首个非空行，空的就是无备注 */
+    private fun previewTextOf(text: CharSequence): String {
+        val first = text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
+        return first.ifBlank { getString(R.string.illustration_note_empty) }
+    }
+
+    private fun expandNoteRow(preview: TextView, edit: EditText) {
+        preview.visibility = View.GONE
+        edit.visibility = View.VISIBLE
+        edit.requestFocus()
+        val imm = requireContext().getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+            as? android.view.inputmethod.InputMethodManager
+        imm?.showSoftInput(edit, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun toggleNoteRow(preview: TextView, edit: EditText) {
+        if (edit.visibility == View.VISIBLE) {
+            preview.text = previewTextOf(edit.text ?: "")
+            edit.visibility = View.GONE
+            preview.visibility = View.VISIBLE
+            val imm = requireContext().getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                as? android.view.inputmethod.InputMethodManager
+            imm?.hideSoftInputFromWindow(edit.windowToken, 0)
+        } else {
+            expandNoteRow(preview, edit)
+        }
+    }
+
+    /** 指定媒体内嵌的工作流 JSON 原文：存的啥填啥，不解析、不提取；无元数据返回 null 不预填 */
+    private fun workflowJsonOf(mediaIndex: Int): String? =
+        parsedWorkflows.getOrNull(mediaIndex)?.takeIf { it.isNotBlank() }
+
+    private fun firstWorkflowJson(): String? =
+        parsedWorkflows.indices.firstNotNullOfOrNull { workflowJsonOf(it) }
+
     private fun save() {
-        if (selectedUris.isEmpty()) {
+        if (parsedMedia.isEmpty()) {
             toastOnUi(R.string.illustration_no_images)
             return
         }
@@ -126,66 +376,50 @@ class IllustrationEditDialog() : BaseDialogFragment(R.layout.dialog_illustration
         val heightText = binding.etHeight.text.toString().trim()
         val displayHeight = heightText.toIntOrNull() ?: 0
         val pageBreak = binding.cbPageBreak.isChecked
-        val cellCount = layoutCellCount()
-        // 选择器放开 */* 后可能选到非媒体文件，先统一读取字节并解析类型，避免中途保存一半
-        val parsed = arrayListOf<Pair<ByteArray, String>>() // bytes to ext
-        selectedUris.forEach { uri ->
-            val bytes = kotlin.runCatching {
-                requireContext().contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            }.getOrNull()
-            if (bytes == null || bytes.isEmpty()) {
-                toastOnUi("读取媒体文件失败")
-                return
-            }
-            // 文件选择器返回的 MIME 可能不可靠（null/octet-stream/报成 image 类），
-            // 按文件名扩展名 → MIME → 文件头嗅探三级判断，确保视频/音频不会落成 jpg
-            val name = IllustrationHelp.queryDisplayName(requireContext(), uri)
-            val mime = requireContext().contentResolver.getType(uri)
-            val ext = IllustrationHelp.resolveMediaExt(name, mime, bytes)
-            if (ext !in IllustrationHelp.VIDEO_EXTS &&
-                ext !in IllustrationHelp.AUDIO_EXTS &&
-                ext !in IllustrationHelp.IMAGE_EXTS
-            ) {
-                toastOnUi("仅支持图片、视频、音频文件")
-                return
-            }
-            parsed.add(bytes to ext)
-        }
-        // 保存媒体文件，记录选择顺序与是否音频
-        val media = arrayListOf<Pair<String, Boolean>>() // src to isAudio
-        parsed.forEach { (bytes, ext) ->
+        snapshotUnitNotes()
+        val unified = binding.cbUnifiedNote.isChecked
+        val unifiedNote = binding.etNote.text.toString()
+        val units = computeUnits()
+        // 保存媒体文件，选择顺序与单元下标一致
+        val srcs = parsedMedia.map { (bytes, ext) ->
             val src = IllustrationHelp.newSrc(ext)
             IllustrationHelp.saveImage(book, src, bytes)
-            media.add(src to IllustrationHelp.isAudioSrc(src))
+            src
         }
-        // 音频永不参与宫格：图片/视频按所选布局成宫格，音频单独成格；
-        // 各块按原始选择顺序排序（音频夹在宫格区间内时排在宫格块之后）
-        val units = arrayListOf<Triple<Int, List<String>, Boolean>>() // firstIndex, srcs, isAudio
-        media.mapIndexedNotNull { index, m ->
-            if (!m.second) index to m.first else null
-        }.chunked(cellCount).forEach { chunk ->
-            units.add(Triple(chunk.first().first, chunk.map { it.second }, false))
-        }
-        media.forEachIndexed { index, m ->
-            if (m.second) units.add(Triple(index, listOf(m.first), true))
-        }
-        units.sortBy { it.first }
         val records = arrayListOf<BookIllustration>()
-        units.forEach { (_, srcs, isAudio) ->
+        units.forEach { unit ->
+            val unitSrcs = unit.indexes.map { srcs[it] }
+            //记录按排版分组存（宫格渲染靠它），备注按媒体各写各的：
+            //统一备注/单媒体组走 note 字段；多媒体组 note 置空，每图备注进 srcNotes
+            val (note, srcNotes) = if (unified) {
+                unifiedNote to "{}"
+            } else if (unit.indexes.size == 1) {
+                unitNotes[unit.firstIndex].orEmpty() to "{}"
+            } else {
+                val map = unit.indexes.mapNotNull { mediaIndex ->
+                    val text = unitNotes[mediaIndex].orEmpty()
+                    if (text.isBlank()) null else srcs[mediaIndex] to text
+                }.toMap()
+                "" to JSONObject(map as Map<*, *>).toString()
+            }
             records.add(
                 newRecord(
                     book,
                     chapter,
-                    srcs,
+                    unitSrcs,
                     displayHeight,
                     pageBreak,
                     records.size,
-                    single = isAudio
+                    note = note,
+                    srcNotes = srcNotes,
+                    single = unit.isAudio
                 )
             )
         }
         if (records.isEmpty()) return
         appDb.bookIllustrationDao.insert(*records.toTypedArray())
+        //插完暂存清掉，下次不再默认带入
+        AiCreationInsertStash.clear()
         dismissAllowingStateLoss()
         toastOnUi(R.string.illustration_inserted)
         callback?.invoke()
@@ -198,6 +432,8 @@ class IllustrationEditDialog() : BaseDialogFragment(R.layout.dialog_illustration
         displayHeight: Int,
         pageBreak: Boolean,
         sortOrder: Int,
+        note: String,
+        srcNotes: String = "{}",
         single: Boolean = false
     ): BookIllustration {
         return BookIllustration(
@@ -215,7 +451,9 @@ class IllustrationEditDialog() : BaseDialogFragment(R.layout.dialog_illustration
             layoutType = if (single) BookIllustration.LAYOUT_SINGLE else selectedLayout(),
             displayHeight = displayHeight,
             pageBreak = pageBreak,
-            sortOrder = sortOrder
+            sortOrder = sortOrder,
+            note = note,
+            srcNotes = srcNotes
         )
     }
 

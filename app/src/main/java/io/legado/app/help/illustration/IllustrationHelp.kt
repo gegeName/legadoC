@@ -31,6 +31,7 @@ import java.io.File
 import java.io.ByteArrayOutputStream
 import java.io.FileOutputStream
 import java.util.UUID
+import org.json.JSONObject
 
 /**
  * 配图（插图）存储、指纹与导出/导入辅助
@@ -427,7 +428,9 @@ object IllustrationHelp {
         val layoutType: String = BookIllustration.LAYOUT_SINGLE,
         val displayHeight: Int = 0,
         val pageBreak: Boolean = false,
-        val sortOrder: Int = 0
+        val sortOrder: Int = 0,
+        val note: String = "",
+        val srcNotes: Map<String, String> = emptyMap()
     )
 
     data class IllustrationJson(
@@ -443,6 +446,14 @@ object IllustrationHelp {
     ): String? {
         if (records.isEmpty()) return null
         val items = records.map { record ->
+            val images = record.imageSrcsFromJson().map { src ->
+                "$EXPORT_IMAGES_DIR/${src.substringAfter(SRC_PREFIX)}"
+            }
+            //每图备注按导出相对路径转存，只留本记录实际包含的图
+            val notes = record.srcNotesMap()
+                .mapKeys { (src, _) -> "$EXPORT_IMAGES_DIR/${src.substringAfter(SRC_PREFIX)}" }
+                .filterKeys { it in images }
+                .filterValues { it.isNotBlank() }
             IllustrationJsonItem(
                 chapterIndex = record.chapterIndex,
                 chapterName = record.chapterName,
@@ -458,7 +469,9 @@ object IllustrationHelp {
                 layoutType = record.layoutType,
                 displayHeight = record.displayHeight,
                 pageBreak = record.pageBreak,
-                sortOrder = record.sortOrder
+                sortOrder = record.sortOrder,
+                note = record.note,
+                srcNotes = notes
             )
         }
         return GSON.toJson(IllustrationJson(bookFile = txtFileName, illustrations = items))
@@ -494,6 +507,15 @@ object IllustrationHelp {
                 }
             }
             if (srcs.isEmpty()) return@forEachIndexed
+            //每图备注按文件名找回新 src：缺图跳过不影响存活图的备注
+            val restoredNotes = item.srcNotes.mapNotNull { (imagePath, note) ->
+                if (note.isBlank()) return@mapNotNull null
+                val imageName = imagePath.substringAfterLast('/')
+                val newSrc = srcs.firstOrNull {
+                    it.substringAfter(SRC_PREFIX) == imageName
+                } ?: return@mapNotNull null
+                newSrc to note
+            }.toMap()
             newRecords.add(
                 BookIllustration(
                     bookUrl = book.bookUrl,
@@ -509,7 +531,9 @@ object IllustrationHelp {
                     layoutType = item.layoutType,
                     displayHeight = item.displayHeight,
                     pageBreak = item.pageBreak,
-                    sortOrder = item.sortOrder
+                    sortOrder = item.sortOrder,
+                    note = item.note,
+                    srcNotes = JSONObject(restoredNotes as Map<*, *>).toString()
                 )
             )
         }

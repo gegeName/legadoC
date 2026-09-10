@@ -1,52 +1,246 @@
 package io.legado.app.help.ai
 
 import io.legado.app.constant.AppLog
-import io.legado.app.data.entities.CreationCard
+import org.json.JSONArray
+import org.json.JSONObject
 
 object AiCreationHelper {
 
-    suspend fun generatePrompt(
+    /**
+     * 提示词页上框即完整LLM输入：路由提示词与模板已渲染，直接原样发给LLM，不再二次套模板。
+     * 铁律：上框文本发送时一字不动，不追加、不删减；想让模型守规则，预填时就写进上框
+     * （看得见、改得掉、删得掉），发送时只拼图片部件、只做标记校验，不碰文本。
+     * 发送前先校验上框标记（重号/跳号/悬空错哪指哪）；供应商支持多模态时 userContent 变为
+     * 多模态数组，第一块永远是上框原文，图片按标记顺序转 base64 跟在后面；
+     * 供应商不支持时图片就地转成文字占位嵌回数组（DSH 同款），原文不动、请求不报错；
+     * 标记校验只看用户带没带图（上框有没有标记），跟模型长没长眼睛无关：
+     * 标记是给下游生图步骤的路由，LLM 看不见图也必须原样保留，否则下游收不到图；
+     * 返回后校验标记，不合格重新生成。
+     */
+    suspend fun generatePromptFromLlmInput(
         session: AiCreationSession,
-        cardsById: Map<Long, CreationCard>
+        llmInput: String
     ): String {
-        //按当前模式取对应体系的变量定义：图片读图片供应商，视频读视频供应商，互不引用
-        val mode = session.paramValue(AI_CREATION_MODE_KEY)
-            ?: error("AI 创作模式未设置")
-        val definition = when (mode) {
-            AiCreationVariables.GROUP_IMAGE -> AiCreationConfig.imageDefinition
-            AiCreationVariables.GROUP_VIDEO -> AiCreationConfig.videoDefinition
-            else -> error("未知 AI 创作模式：$mode")
-        }
+        val refs = session.materialImageRefs
+        validateMarkers(llmInput, refs)
+        val imageCount = parseMarkers(llmInput).size
         val target = AiCreationConfig.requireModelTarget()
-        val requestValues = buildRequestValues(session, definition.variables)
-        val routeParams = definition.variables.associate {
-            it.key to requestValues[it.key].orEmpty()
-        }
-        val promptName = AiCreationConfig.resolvePromptName(definition, routeParams)
-        val promptText = AiCreationConfig.promptTextOf(promptName)
-        val userContent = renderFinalPrompt(
-            finalPrompt = definition.finalPrompt,
-            prompt = promptText,
-            material = session.buildMaterialText(cardsById)
-        )
+        val vision = target.provider.supportsVision
+        val content = buildLlmUserContent(llmInput, refs, imageCount, vision)
         AppLog.putAi(
             "AI_CREATION REQUEST\n" +
                 "provider=${target.provider.name}\n" +
                 "model=${target.modelId}\n" +
-                "route=$promptName\n" +
-                "routeParams=${routeParams.entries.joinToString("，") { "${it.key}=${it.value}" }}\n" +
-                "userChars=${userContent.length}"
+                "llmInputChars=${llmInput.length}\n" +
+                "imageCount=$imageCount\n" +
+                "supportVision=$vision"
         )
-        val response = AiChatService.generatePlainText(
-            provider = target.provider,
-            model = target.modelId,
-            userContent = userContent,
-            temperature = 0.7
-        )
+        //标记校验只看用户带没带图：带了图，返回必须保留标记给下游生图用；
+        //眼睛看不见不是理由，规则照发、校验照跑
+        val response = sendWithMarkerValidation(target, content, imageCount)
+        //工作流溯源：记录本次发给 LLM 的完整输入与 LLM 返回；
+        //返回只记 llmOutput 一份，下框二次编辑或手填只动 prompt，不覆盖它
+        session.setParam(AI_CREATION_LLM_INPUT_KEY, llmInput)
+        session.llmOutput = response
         return response
     }
 
-    /** 供应商变量只服务于路由与最终图片/视频请求，不进入 LLM 的 finalPrompt。 */
+    /**
+     * 标记校验（上框发送与下框生成图片共用）：标记必须是 1..M 的连续集合且各出现一次，
+     * 每个标记都要能对应到集合里的现存图片文件；标记数小于集合数表示删了标记（对应图片不发）。
+     */
+    fun validateMarkers(text: String, refs: List<String>) {
+        val markers = parseMarkers(text)
+        if (markers.isEmpty()) return
+        val duplicated = markers.groupingBy { it }.eachCount()
+            .filterValues { it > 1 }.keys.sorted()
+        require(duplicated.isEmpty()) {
+            "图片标记重复：${duplicated.joinToString("、") { AiCreationImageMarkers.markerOf(it) }}"
+        }
+        val dangling = markers.filter { it > refs.size }.sorted()
+        require(dangling.isEmpty()) {
+            "图片标记没有对应的图片：${dangling.joinToString("、") { AiCreationImageMarkers.markerOf(it) }}"
+        }
+        val missing = (1..markers.max()).filterNot(markers::contains)
+        require(missing.isEmpty()) {
+            "图片标记跳号：缺少 ${missing.joinToString("、") { AiCreationImageMarkers.markerOf(it) }}"
+        }
+        val missingFiles = markers
+            .map { it to AiCreationCardImages.fileOf(refs[it - 1]) }
+            .filter { it.second == null }
+            .map { it.first }
+        require(missingFiles.isEmpty()) {
+            "图片文件不存在：${missingFiles.joinToString("、") { AiCreationImageMarkers.markerOf(it) }}"
+        }
+    }
+
+    /** 解析文本里的图片标记（按出现顺序；异常大编号视为悬空，不静默丢弃） */
+    fun parseMarkers(text: String): List<Int> =
+        AiCreationImageMarkers.REGEX.findAll(text)
+            .map { it.groupValues[1].toIntOrNull() ?: Int.MAX_VALUE }
+            .toList()
+
+    /**
+     * 生图/生视频链路的图片解析：按下框提示词里的标记取对应图片转 base64 data URL，
+     * 顺序与 LLM 链路一致（1..N 数字序）；无标记返回空表（纯文生）；
+     * 标记与集合不一致或文件缺失直接报错，不静默丢图。
+     */
+    fun resolvePromptImageDataUrls(prompt: String, refs: List<String>): List<String> {
+        val markers = parseMarkers(prompt)
+        if (markers.isEmpty()) return emptyList()
+        validateMarkers(prompt, refs)
+        return markers.distinct().sorted().map { number ->
+            AiCreationCardImages.dataUrlOf(refs[number - 1])
+        }
+    }
+
+    /**
+     * LLM 输入份图片溯源：按上框（llmInput）标记解析对应图片 base64 data URL，
+     * 只要涉及图片就 100% 记录，不管这次有没有实际请求 LLM；
+     * 编号超出图片集合的悬空标记跳过（llmInput 文本本身仍如实记录该标记），
+     * 文件缺失由 dataUrlOf 直接抛错，不静默丢图。
+     */
+    fun resolveLlmInputImageDataUrls(llmInput: String, refs: List<String>): List<String> {
+        val markers = parseMarkers(llmInput)
+        if (markers.isEmpty()) return emptyList()
+        return markers.distinct().sorted()
+            .filter { it in 1..refs.size }
+            .map { number -> AiCreationCardImages.dataUrlOf(refs[number - 1]) }
+    }
+
+    /**
+     * 组装 LLM userContent：上框原文一字不动，只在后面拼图片部件。
+     * 无图：字符串原样返回；有图且供应商支持多模态：原文文本块 + 图片块；
+     * 有图但供应商不支持：原文文本块 + 每张图的"已省略"文字占位块（原文不动）；
+     * 标记校验只看原文里的标记，拼包过程不增不减任何文字。
+     */
+    private fun buildLlmUserContent(
+        llmInput: String,
+        refs: List<String>,
+        imageCount: Int,
+        supportVision: Boolean
+    ): Any {
+        if (imageCount == 0) return llmInput
+        if (!supportVision) {
+            val array = JSONArray()
+            array.put(JSONObject().put("type", "text").put("text", llmInput))
+            for (index in 1..imageCount) {
+                array.put(
+                    JSONObject().put("type", "text").put(
+                        "text",
+                        "用户在此输入了一个媒体文件，但是当前供应商不支持媒体输入。"
+                    )
+                )
+            }
+            return array
+        }
+        val array = JSONArray()
+        array.put(JSONObject().put("type", "text").put("text", llmInput))
+        for (index in 1..imageCount) {
+            val ref = refs[index - 1]
+            array.put(
+                JSONObject()
+                    .put("type", "image_url")
+                    .put("image_url", JSONObject().put("url", AiCreationCardImages.dataUrlOf(ref)))
+            )
+        }
+        return array
+    }
+
+    /**
+     * 发送并校验返回标记：返回的提示词必须原样保留全部标记（数量一致、编号连续），
+     * 不合格按 AI 设置里的重新生成上限重发；仍不合格如实报错，不静默吞。
+     */
+    private suspend fun sendWithMarkerValidation(
+        target: AiCreationModelTarget,
+        content: Any,
+        imageCount: Int
+    ): String {
+        val limit = AiCreationConfig.promptRegenerateLimit
+        var lastProblem = ""
+        for (attempt in 0..limit) {
+            if (attempt > 0) {
+                AppLog.putAi(
+                    "AI_CREATION PROMPT_REGENERATE\n" +
+                        "attempt=$attempt\n" +
+                        "limit=$limit\n" +
+                        "problem=$lastProblem"
+                )
+            }
+            val response = AiChatService.generatePlainText(
+                provider = target.provider,
+                model = target.modelId,
+                userContent = content,
+                temperature = 0.7
+            )
+            val problem = markerProblem(response, imageCount) ?: return response
+            lastProblem = problem
+        }
+        throw IllegalStateException(
+            "提示词标记校验未通过（已生成 ${limit + 1} 次）：$lastProblem"
+        )
+    }
+
+    /** 返回文本的标记校验：无图不校验；有图时数量必须一致且编号为 1..N 连续 */
+    private fun markerProblem(text: String, expected: Int): String? {
+        if (expected <= 0) return null
+        val markers = parseMarkers(text)
+        val first = AiCreationImageMarkers.markerOf(1)
+        val last = AiCreationImageMarkers.markerOf(expected)
+        if (markers.isEmpty()) {
+            return "返回内容没有保留图片标记（应为 $first 到 $last 共 $expected 个）"
+        }
+        val duplicated = markers.groupingBy { it }.eachCount()
+            .filterValues { it > 1 }.keys.sorted()
+        if (duplicated.isNotEmpty()) {
+            return "返回的图片标记重复：${duplicated.joinToString("、") { AiCreationImageMarkers.markerOf(it) }}"
+        }
+        if (markers.size != expected || !markers.containsAll((1..expected).toList())) {
+            return "返回的图片标记数量或编号不符：应为 $first 到 $last 共 $expected 个，实际 ${markers.size} 个"
+        }
+        return null
+    }
+
+    /** 统一渲染入口：用LLM输入模板组合路由提示词与素材，得到发给LLM的完整输入；提示词页预填用 */
+    fun buildLlmInput(
+        session: AiCreationSession,
+        materialText: String
+    ): String {
+        //LLM 变量与输入模板来自全局 LLM 变量设置，与供应商无关
+        val mode = session.paramValue(AI_CREATION_MODE_KEY)
+            ?: error("AI 创作模式未设置")
+        val llmDefinition = when (mode) {
+            AiCreationVariables.GROUP_IMAGE -> AiCreationConfig.imageLlmDefinition
+            AiCreationVariables.GROUP_VIDEO -> AiCreationConfig.videoLlmDefinition
+            else -> error("未知 AI 创作模式：$mode")
+        }
+        val routeParams = llmDefinition.variables.associate {
+            it.key to it.effectiveValue(session.llmVariableValue(mode, it.key))
+        }
+        val promptName = AiCreationConfig.resolvePromptName(llmDefinition, routeParams)
+        val promptText = AiCreationConfig.promptTextOf(promptName)
+        var rendered = renderLlmInput(
+            template = llmDefinition.llmInputTemplate,
+            prompt = promptText,
+            material = materialText
+        )
+        //预填就把规则带上框：素材里有标记才缀，用户在上框看得见、改得掉、删得掉；
+        //库里没该条目直接报错，不留到发送时
+        if (parseMarkers(rendered).isNotEmpty()) {
+            llmDefinition.markerRule?.takeIf { it.isNotBlank() }?.let { ruleName ->
+                rendered += "\n\n" + AiCreationConfig.promptTextOf(ruleName)
+            }
+        }
+        AppLog.putAi(
+            "AI_CREATION LLM_INPUT\n" +
+                "route=$promptName\n" +
+                "routeParams=${routeParams.entries.joinToString("，") { "${it.key}=${it.value}" }}\n" +
+                "llmInputChars=${rendered.length}"
+        )
+        return rendered
+    }
+
+    /** 供应商变量只服务于路由与最终图片/视频请求，不进入 LLM 输入。 */
     fun buildRequestValues(
         session: AiCreationSession,
         variables: List<AiCreationVariable>
@@ -62,19 +256,20 @@ object AiCreationHelper {
         return values
     }
 
-    private fun renderFinalPrompt(
-        finalPrompt: String,
+    /** 用 LLM 输入模板组合路由提示词与素材，得到发给 LLM 的完整输入。 */
+    private fun renderLlmInput(
+        template: String,
         prompt: String,
         material: String
     ): String {
-        val rendered = finalPrompt
+        val rendered = template
             .replace("\${prompt}", prompt)
             .replace("\${素材}", material)
         val unresolved = TEMPLATE_VARIABLE.findAll(rendered)
             .map { it.groupValues[1] }
             .toSet()
         require(unresolved.isEmpty()) {
-            "finalPrompt 包含未定义变量：${unresolved.joinToString("、")}"
+            "LLM 输入模板包含未定义变量：${unresolved.joinToString("、")}"
         }
         return rendered
     }

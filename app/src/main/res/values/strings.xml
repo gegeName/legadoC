@@ -228,6 +228,22 @@
     <string name="speak_engine_current">Current engine</string>
     <string name="read_aloud_float_on_desktop">Float on desktop</string>
     <string name="read_aloud_float_on_desktop_summary">Show the speech controller outside this app. Requires floating window permission; off means it only floats in the reading page.</string>
+    <string name="fallback_setting">Fallback settings</string>
+    <string name="fallback_setting_summary">Roll back aggressive new behaviors</string>
+    <string name="audio_book_direct_audio_play_no_subtitle">Audio books without subtitles go to immersive listening</string>
+    <string name="audio_book_direct_audio_play_no_subtitle_summary">When on, audio books with no available subtitles open the immersive listening page directly instead of the reader.</string>
+    <string name="audio_book_direct_audio_play_all">All audio books go to immersive listening</string>
+    <string name="audio_book_direct_audio_play_all_summary">When on, every audio book opens the immersive listening page directly. Takes precedence over the no-subtitle rule.</string>
+    <string name="audio_book_direct_audio_play_auto_play">Auto-play after entering listening page</string>
+    <string name="audio_book_direct_audio_play_auto_play_summary">When on, playback starts automatically after entering the immersive listening page through the rules above.</string>
+    <string name="read_aloud_floating_outside_reader">Show read-aloud floating window outside reader</string>
+    <string name="read_aloud_floating_outside_reader_summary">When on, the read-aloud floating window can be shown on other screens inside this app, like the AI creation floating window. The desktop floating window is still controlled by \"Float on desktop\".</string>
+    <string name="ai_creation_floating_outside_reader">Show AI creation floating window outside reader</string>
+    <string name="ai_creation_floating_outside_reader_summary">When on, the AI creation floating window can be shown on screens outside the reader. Off means it only shows in the reader.</string>
+    <string name="ai_creation_floating_auto_close">AI creation floating window auto-close</string>
+    <string name="ai_creation_floating_auto_close_summary">Seconds after the task finishes before the floating window closes itself. Empty means never auto-close.</string>
+    <string name="ai_creation_floating_auto_close_current">Current: %1$s seconds</string>
+    <string name="ai_creation_floating_auto_close_off">Off</string>
     <string name="read_aloud_hide_floating_window">Hide read aloud floating window</string>
     <string name="read_aloud_hide_floating_window_summary">Do not show the read aloud floating controls. Keep notification controls and the foreground-service notification alive instead.</string>
     <string name="read_aloud_cover_rotation">Rotate read-aloud cover</string>
@@ -383,13 +399,15 @@
     <string name="ai_creation_next">Next</string>
     <string name="ai_creation_generate_prompt">Generate Prompt</string>
     <string name="ai_creation_generating">Generating…</string>
-    <string name="ai_creation_copy_prompt">Copy Prompt</string>
+    <string name="ai_creation_copy">Copy</string>
     <string name="ai_creation_copied">Copied</string>
     <string name="ai_creation_staged">Staged to AI creation selected text</string>
     <string name="ai_creation_prompt_empty">Prompt is empty</string>
     <string name="ai_creation_compose">Compose</string>
     <string name="ai_creation_prompt_title">Prompt</string>
-    <string name="ai_creation_prompt_hint">The generated prompt will appear here</string>
+    <string name="ai_creation_llm_input_hint">LLM input (editable)</string>
+    <string name="ai_creation_manual_prompt_hint">Enter prompt manually; used for image/video generation</string>
+    <string name="ai_creation_llm_input_empty">LLM input is empty</string>
     <string name="ai_creation_clear">Clear</string>
     <string name="ai_creation_clear_confirm">Clear the current creation session and session-only materials?</string>
     <string name="ai_creation_add">+</string>
@@ -403,8 +421,8 @@
     <string name="ai_creation_linking_hint">Tap or long-press another section name to link</string>
     <string name="ai_creation_link_done">Sections linked (%s group)</string>
     <string name="ai_creation_link_removed">Link removed</string>
-    <string name="ai_creation_select_card_first">Add at least one material card</string>
     <string name="ai_creation_new_card">New card</string>
+    <string name="ai_creation_config_sanitized">AI creation config invalid, restored to default: %1$s</string>
     <string name="creation_card_delete_confirm">Delete this card? It will also be removed from the current creation session.</string>
     <string name="creation_image_import_failed">Image import failed</string>
     <string name="rename">Rename</string>
@@ -415,13 +433,16 @@
     <string name="ai_creation_provider_summary_empty">Not selected</string>
     <string name="ai_creation_model">Model</string>
     <string name="ai_creation_model_summary_empty">Not selected</string>
-    <string name="ai_creation_variables">Variables and final prompt</string>
-    <string name="ai_creation_variables_invalid">Invalid variables or final prompt: %1$s</string>
+    <string name="ai_creation_variables">Variables</string>
+    <string name="ai_creation_variables_invalid">Invalid variables: %1$s</string>
+    <string name="ai_creation_llm_variables">LLM variables</string>
+    <string name="ai_creation_llm_variables_summary">Image/video style variables, prompt routes and LLM input template; controls what is sent to the LLM</string>
+    <string name="ai_creation_llm_variables_hint">JSON object with image/video sections; each section has variables (style), routes and llmInputTemplate containing exactly one ${prompt} and one ${素材}</string>
     <string name="ai_creation_prompt_template">Prompt template</string>
     <string name="ai_creation_prompt_template_summary">JSON object with %d entries; keys are route targets and values must be plain text without placeholders</string>
-    <string name="ai_creation_prompt_template_hint">JSON object: { &quot;连环画&quot;: &quot;Split material into sequential shots.&quot; }. Values cannot contain placeholders; the provider finalPrompt combines the routed text and material</string>
-    <string name="ai_creation_request_template">Request template</string>
-    <string name="ai_creation_request_template_invalid">Invalid request templates: %1$s</string>
+    <string name="ai_creation_prompt_template_hint">JSON object: { &quot;连环画&quot;: &quot;Split material into sequential shots.&quot; }. Values cannot contain placeholders; the LLM variable settings combine the routed text and material</string>
+    <string name="ai_creation_request_template">Request body</string>
+    <string name="ai_creation_request_template_invalid">Invalid request body: %1$s</string>
     <string name="ai_creation_test_connection">Test connection</string>
     <string name="ai_creation_test_connection_summary">Test the creation model connection</string>
     <string name="ai_creation_scope_selected_text">Scope: Selected text</string>
@@ -443,7 +464,7 @@
     <string name="ai_creation_page_info">%1$d/%2$d</string>
     <string name="ai_creation_done_mark">✓</string>
     <string name="ai_creation_slot_failed">Failed: %1$s</string>
-    <string name="ai_creation_image_request_template">Image request template</string>
+    <string name="ai_creation_image_request_template">Image request body</string>
     <string name="ai_creation_image_add_provider">Add image provider</string>
     <string name="ai_creation_image_add_provider_summary">Add a custom provider; built-in: free providers</string>
     <string name="ai_creation_image_manage_providers">Manage image providers</string>
@@ -467,11 +488,29 @@
     <string name="ai_creation_video_test_running">Testing video generation (submitting and polling, may take minutes)…</string>
     <string name="ai_creation_video_test_success">Test succeeded, video returned</string>
     <string name="ai_creation_connection_test_failed">Test failed: %1$s</string>
-    <string name="ai_creation_image_variables">Image variables and final prompt</string>
-    <string name="ai_creation_video_variables">Video variables and final prompt</string>
-    <string name="ai_creation_video_request_template">Video request template</string>
+    <string name="ai_creation_image_variables">Image variables</string>
+    <string name="ai_creation_video_variables">Video variables</string>
+    <string name="ai_creation_video_request_template">Video request body</string>
+    <string name="ai_creation_insert_image_title">Insert image</string>
+    <string name="ai_creation_grid_single">Single</string>
+    <string name="ai_creation_grid_height">Total height (px)</string>
+    <string name="ai_creation_save_md">Save MD with images</string>
+    <string name="ai_creation_md_saved">MD saved to Download/Legado</string>
+    <string name="ai_creation_md_save_failed">Failed to save MD</string>
+    <string name="ai_creation_insert">Insert</string>
+    <string name="ai_creation_stash_hint">Stashed %1$d item(s), now choose where to insert</string>
+    <string name="ai_creation_stash_gone">Stashed media no longer exists</string>
+    <string name="illustration_note_empty">No note – tap to input</string>
+    <string name="ai_creation_save_workflow">Save workflow</string>
+    <string name="ai_creation_copy_workflow">Copy workflow</string>
+    <string name="ai_creation_view_workflow">View workflow</string>
+    <string name="ai_creation_workflow_missing">Workflow metadata not found</string>
+    <string name="ai_creation_workflow_saved">Workflow saved to Download/Legado</string>
+    <string name="ai_creation_workflow_save_failed">Failed to save workflow</string>
+    <string name="ai_creation_workflow_copied">Workflow copied</string>
     <string name="ai_creation_provider_builtin">Built-in provider cannot be removed</string>
     <string name="ai_creation_provider_required">Set a current provider in Manage Providers first</string>
+    <string name="ai_creation_fetch_models_unsupported">This provider does not support fetching models from its API</string>
     <string name="ai_creation_model_required">Add a model for the current provider first</string>
     <string name="ai_creation_current_provider_empty">No current provider</string>
     <string name="ai_creation_current_model_empty">No current model</string>
@@ -479,6 +518,11 @@
     <string name="ai_creation_video_edit_provider">Edit video provider</string>
     <string name="ai_creation_image_retry_count">Image retry count</string>
     <string name="ai_creation_image_retry_count_summary">Retries after a failed request: %1$d</string>
+    <string name="ai_creation_prompt_regenerate_limit">Prompt regenerate limit</string>
+    <string name="ai_creation_prompt_regenerate_limit_summary">Regenerations when the returned markers fail validation: %1$d (0 disables regeneration)</string>
+    <string name="ai_creation_save_images">Save images</string>
+    <string name="ai_creation_images_empty">No images</string>
+    <string name="ai_creation_images_saved">Saved %1$d/%2$d images to album in order</string>
     <string name="cache_manage_creation">Creation</string>
     <string name="cache_manage_creation_delete_confirm">Delete %1$d generated image(s)?</string>
     <string name="ai_reply">AI Reply</string>
@@ -533,6 +577,7 @@
     <string name="no_download">No download</string>
     <string name="download_count">Downloaded %1$d/%2$d</string>
     <string name="download_count_review">Text %1$d/%2$d · Reviews %3$d/%4$d</string>
+    <string name="download_count_review_loading">Cached %1$d/%2$d · Loading review index…</string>
     <string name="download_count_review_audio">Audio &amp; transcript %1$d/%2$d · Reviews %3$d/%4$d</string>
     <string name="review_notification_detail">Text %1$d/%2$d · Reviews %3$d/%4$d · Review snapshots %5$d/%6$d</string>
     <string name="import_select_book">Import selected book(s)</string>
@@ -934,8 +979,6 @@
     <string name="ai_set_current_provider">设为当前提供商</string>
     <string name="ai_edit_provider">编辑提供商</string>
     <string name="ai_remove_provider">删除提供商</string>
-    <string name="ai_remove_provider_confirm">确定删除这个提供商吗？</string>
-    <string name="ai_remove_provider_confirm_with_models">确定删除这个提供商吗？关联的 %1$d 个模型也会一起删除。</string>
     <string name="ai_provider_saved">已保存提供商</string>
     <string name="ai_provider_removed">已删除提供商</string>
     <string name="ai_model">模型</string>
@@ -944,6 +987,7 @@
     <string name="ai_api_key">API Key</string>
     <string name="ai_api_key_summary">Used for Authorization authentication</string>
     <string name="ai_custom_headers">Custom headers</string>
+    <string name="ai_provider_support_vision">Supports multimodal (media input)</string>
     <string name="ai_web_tools">AI web tools</string>
     <string name="ai_tavily_enable">Enable Tavily search</string>
     <string name="ai_tavily_enable_summary">Expose Tavily as a real-time web search tool for AI.</string>
@@ -986,8 +1030,21 @@
     <string name="ai_manage_models">Manage models</string>
     <string name="ai_manage_models_summary">%1$d models added</string>
     <string name="ai_edit_model">Edit model</string>
-    <string name="ai_edit_request">Edit request</string>
+    <string name="ai_edit_request">Edit request body</string>
     <string name="ai_edit_request_summary">Edit the JSON body used by chapter purification and its connection test.</string>
+    <string name="ai_send_image_max_resolution">Max image resolution for sending</string>
+    <string name="ai_context_trim">Model context settings</string>
+    <string name="ai_context_trim_summary">Context and compression settings</string>
+    <string name="ai_context_max_tokens">Model max context (tokens)</string>
+    <string name="ai_context_trim_to_tokens">When exceeded, trim to (tokens)</string>
+    <string name="ai_context_tool_trim">Trim tool outputs</string>
+    <string name="ai_context_tool_trim_mode">Tool output trim mode</string>
+    <string name="ai_context_tool_trim_mode_head_tail">Keep head and tail (split evenly)</string>
+    <string name="ai_context_tool_trim_mode_head">Keep head only</string>
+    <string name="ai_context_tool_trim_mode_tail">Keep tail only</string>
+    <string name="ai_context_tool_trim_chars">Tool output trim threshold (chars)</string>
+    <string name="ai_context_trim_invalid">Values must be positive integers, and the trim target must be smaller than the max context</string>
+    <string name="ai_send_image_max_resolution_summary">Image resolution budget</string>
     <string name="ai_edit_request_hint">Structured request JSON</string>
     <string name="ai_edit_request_invalid">Request template is invalid: %s</string>
     <string name="ai_model_saved">Model saved</string>
@@ -1015,7 +1072,6 @@
     <string name="ai_chapter_purify_prompt_summary">Edit task instructions; the JSON protocol remains fixed.</string>
     <string name="ai_chapter_purify_prompt_hint">Enter chapter purification task instructions</string>
     <string name="ai_chapter_purify_flow_info">AI chapter purification flow</string>
-    <string name="ai_chapter_purify_flow_info_summary">View the A, B, C, and D text-processing stages and preprocessing scopes.</string>
     <string name="ai_chapter_purify_flow_info_message">A Raw source text\n↓ Existing purification replacement rules\nB State without AI purification\n↓ AI input preprocessing\nC Text sent to the AI model\n↓ New replacement rules generated by AI\nD Purified final output\n\nPreprocessing scopes:\nad: ad detection\ntypo: typo correction\nnoise: noise cleaning</string>
     <string name="ai_chapter_purify_preprocess">Edit AI input preprocessing</string>
     <string name="ai_chapter_purify_preprocess_summary">Edit paragraph-level B-to-C JSON regex rules and scopes; ids and paragraph boundaries are protected.</string>
@@ -1063,6 +1119,7 @@
     <string name="ai_disable_mcp_server">停用服务器</string>
     <string name="ai_chat_empty">Start a new chat.</string>
     <string name="ai_chat_history">Chat history</string>
+    <string name="ai_chat_export">Export chat</string>
     <string name="ai_history_empty">No chat history yet</string>
     <string name="ai_new_chat">New chat</string>
     <string name="ai_history_open">Open chat</string>
@@ -1075,12 +1132,10 @@
     <string name="ai_chat_send">Send</string>
     <string name="ai_chat_stop">Stop</string>
     <string name="ai_chat_thinking">Thinking…</string>
-    <string name="ai_read_clear_history">Clear current book history</string>
-    <string name="ai_read_history_empty">No reading AI history for this book yet.</string>
-    <string name="ai_read_delete_history">Delete this record</string>
-    <string name="ai_read_clear_history_confirm">Clear all Ask AI history for this book?</string>
     <string name="ai_chat_thinking_collapsed">Thinking, tap to expand</string>
     <string name="ai_chat_thinking_done">Thinking completed, tap to expand</string>
+    <string name="ai_chat_think">Think</string>
+    <string name="ai_chat_thought_done">Thought for a while</string>
     <string name="select">Select</string>
     <string name="expand">Expand</string>
     <string name="collapse">Collapse</string>
@@ -1125,7 +1180,6 @@
     <string name="ai_no_models">No models available</string>
     <string name="ai_set_current">Set as current model</string>
     <string name="ai_remove_model">Remove model</string>
-    <string name="ai_remove_model_confirm">Remove this model?</string>
     <string name="ai_model_removed">Model removed</string>
     <string name="ai_request_failed">Request failed: %s</string>
     <string name="ai_request_cancelled">Request cancelled</string>
@@ -1721,10 +1775,10 @@
     <string name="scope_content">Act on the content</string>
     <string name="join_qq_channel">Join QQ channel</string>
     <string name="qq_channel_summary">点击加入阅读QQ频道</string>
-    <string name="join_telegram_channel">加入我的 QQ 群 1101873338</string>
+    <string name="join_telegram_channel">加入我的 QQ 群 1004372141</string>
     <string name="telegram_channel_summary">长按复制 QQ 群号</string>
-    <string name="qq_group_url">https://qun.qq.com/universal-share/share?ac=1&amp;authKey=DjJiNVMOKfQWe3Tz2pQhpzCWV79FiKXtG0ApFXK2xrW%2BMjMDk%2BXZT784JjNJq8TY&amp;busi_data=eyJncm91cENvZGUiOiIxMTAxODczMzM4IiwidG9rZW4iOiJOeVdUYWtZaUI1bG9oM21NNkUyUFFuc2hmODY5NUUxVjFkVmMrd0hYeDMyN1dyNXptWlp5UEVPOHA3dDRENGVSIiwidWluIjoiMjgzMTgzNTgzMSJ9&amp;data=kNYZB_IOxrKSE7bIMccDv9yiYlaW0blrCKX2ZIbs1RTo5SoT3tryoyBSOKOq6meXNocy0JYPuZW5qmJDtoCmAA&amp;svctype=4&amp;tempid=h5_group_info</string>
-    <string name="qq_group_number">1101873338</string>
+    <string name="qq_group_url">https://qun.qq.com/universal-share/share?ac=1&amp;authKey=Ulqf2L2Vfhg5%2Fu%2BoT%2BYEFYzCWvwLLNi0Vnqrbu1xgwhEDje0ET3Xx34IT1xayr%2FO&amp;busi_data=eyJncm91cENvZGUiOiIxMDA0MzcyMTQxIiwidG9rZW4iOiIrQW9wMWNjRkRmR3ZGUG1CYWZlbzFGNUpuays0ZnpmY3k1R0dDVUl6OStCQ1Y0Yi9neEhGK2YxYXJoOFZyaXN5IiwidWluIjoiMjgzMTgzNTgzMSJ9&amp;data=XMopS5ADBDyAfQdXCZsFV5tZg3vNoLOuWMQUohraa4FsBBeCdXmjAP1gFHVWOniA41RtYHDifrACTGs9DKGVZA&amp;svctype=4&amp;tempid=h5_group_info</string>
+    <string name="qq_group_number">1004372141</string>
     <string name="qq_group_number_copied">群号已复制</string>
     <string name="menu_refresh_dur">Refresh the current chapter</string>
     <string name="menu_refresh_after">Refresh the chapter after</string>
@@ -2470,6 +2524,8 @@
     <string name="cache_manage_no_cache">No cache to upload</string>
     <string name="cache_manage_pack_failed">Failed to pack cache</string>
     <string name="cache_manage_upload_all">Upload all</string>
+    <string name="cache_manage_workflow_exported">Exported %1$d workflow file(s)</string>
+    <string name="cache_manage_workflow_missing_part">; %1$d item(s) without workflow metadata</string>
     <string name="cache_manage_delete_all">Delete all</string>
     <string name="cache_manage_batch_empty">No cache to operate</string>
     <string name="cache_manage_batch_upload_done">Batch upload finished: %1$d succeeded, %2$d failed</string>
@@ -2501,8 +2557,10 @@
     <string name="cache_manage_review_snapshots">Review snapshots</string>
     <string name="cache_manage_review_chapter">Chapter %1$d</string>
     <string name="cache_manage_review_progress">%1$d/%2$d</string>
+    <string name="cache_manage_review_persisted">%1$d cached snapshots</string>
     <string name="cache_manage_review_success">Success</string>
     <string name="cache_manage_review_failed">Failed %1$d</string>
+    <string name="cache_manage_review_status_missing">Status not recorded; retry this chapter</string>
     <string name="cache_manage_review_retry">Retry</string>
     <string name="cache_manage_review_retry_all">Retry all failed</string>
     <string name="cache_manage_review_empty">No review snapshots</string>
@@ -2565,16 +2623,6 @@
     <string name="read_rank_widget_description">Reading rank widget</string>
     <string name="color_format_error">Invalid color format</string>
     <string name="unknown">Unknown</string>
-    <string name="ai_read_prompt_template">You are the Ask AI assistant inside the reading page. Answer around the current book and selected text. Prioritize explaining the original text, context, character relationships, foreshadowing, or the user question. Do not invent plot details not provided.
-
-Book: %1$s
-Author: %2$s
-Source: %3$s
-Current chapter: %4$s (chapter %5$d)
-
-Selected text or question:
-%6$s</string>
-
     <!--配图（插图）-->
     <string name="menu_illustration">插入</string>
     <string name="illustration_title">插入</string>
@@ -2604,17 +2652,25 @@ Selected text or question:
     <string name="illustration_delete">删除配图</string>
     <string name="illustration_deleted">配图已删除</string>
     <string name="illustration_empty">本书暂无配图</string>
+    <string name="illustration_note">备注</string>
+    <string name="illustration_unified_note">统一备注</string>
+    <string name="illustration_note_hint">支持 Markdown，留空无备注</string>
+    <string name="illustration_view_note">查看备注</string>
+    <string name="illustration_note_image_unit">配图%1$d（共%2$d张）</string>
+    <string name="illustration_note_audio_unit">音频%1$d</string>
     <string name="illustration_list_mode">列表</string>
     <string name="illustration_grid_mode">宫格</string>
     <string name="illustration_export_name">配图书籍</string>
     <string name="ai_provider_and_model">Providers and models</string>
     <string name="ai_logs_category">Logs</string>
     <string name="ai_timeout">Timeout</string>
-    <string name="ai_edit_request_summary_global">Default JSON request body for chapter purification and current-model connection tests.</string>
+    <string name="ai_edit_request_summary_global">Edit request body content</string>
     <string name="ai_chapter_purify_request_template">Edit request</string>
-    <string name="ai_chapter_purify_request_template_summary_inherited">Not set independently; inherits the global request template.</string>
-    <string name="ai_chapter_purify_request_template_summary_custom">Using an independent request template.</string>
-    <string name="ai_restore_global_request">Restore global request</string>
+    <string name="ai_chapter_purify_request_template_summary">JSON request body dedicated to chapter purification; defaults to response_format=json_object.</string>
+    <string name="ai_storyboard_request_template">Edit storyboard request</string>
+    <string name="ai_storyboard_request_template_summary">JSON request body dedicated to AI storyboarding; defaults to response_format=json_object.</string>
+    <string name="ai_casting_request_template">Edit casting request</string>
+    <string name="ai_casting_request_template_summary">JSON request body dedicated to AI casting; defaults to response_format=json_object.</string>
     <string name="disable_source_toast">Hide book-source bottom messages</string>
     <string name="disable_source_toast_summary">Do not show bottom messages sent by book-source scripts through toast or longToast.</string>
     <string name="disable_all_toast">Hide all bottom messages</string>
@@ -2666,9 +2722,12 @@ Selected text or question:
     <string name="homepage_module_count">%d modules</string>
     <string name="homepage_empty_title">No homepage modules</string>
     <string name="homepage_empty_desc">Tap the manage button in the top bar to add modules</string>
-    <string name="homepage_load_failed">Load failed, tap to retry</string>
+    <string name="homepage_load_failed">Load failed</string>
+    <string name="homepage_click_retry">Tap to retry</string>
     <string name="homepage_load_more">Load more</string>
     <string name="homepage_loading">Loading</string>
+    <string name="homepage_expand_all">Expand all</string>
+    <string name="homepage_collapse">Collapse</string>
     <string name="homepage_new_custom_set">New set</string>
     <string name="homepage_browse_book_sources">Browse book sources</string>
     <string name="homepage_browse_rss_sources">Browse RSS sources</string>
@@ -2716,13 +2775,21 @@ Selected text or question:
     <string name="homepage_layout_mixed">Mixed list</string>
     <string name="homepage_layout_source_tab">Source tabs</string>
     <string name="homepage_preload">Preload adjacent tabs</string>
-    <string name="homepage_select_category">Select category</string>
-    <string name="homepage_select_pagination">Select pages</string>
+    <string name="homepage_select_kinds">Select categories</string>
     <string name="homepage_drag_sort">Drag to sort</string>
-    <string name="homepage_multi_select_hint">Select multiple categories to merge into one module</string>
     <string name="homepage_selected_categories_count">%d selected</string>
     <string name="homepage_loading_categories">Loading categories</string>
     <string name="homepage_manual_add_module">Add module manually</string>
     <string name="homepage_kind_select_title">Select categories</string>
     <string name="homepage_kind_select_confirm">OK</string>
+    <string name="agent_category">Agent</string>
+    <string name="agent_enabled">Agent 启用</string>
+    <string name="agent_mcp">MCP 管理</string>
+    <string name="agent_servers">MCP Server 管理</string>
+    <string name="agent_skills">Skill 管理</string>
+    <string name="agent_modes">Agent 模式</string>
+    <string name="agent_prompts">提示词库</string>
+    <string name="agent_tools">工具设置</string>
+    <string name="agent_loading">正在加载 Agent 配置…</string>
+    <string name="agent_internal_switch_summary">内部 Agent 总开关；关闭后停止当前任务，对外 MCP 服务不受影响</string>
 </resources>

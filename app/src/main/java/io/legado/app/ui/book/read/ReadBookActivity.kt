@@ -7,7 +7,6 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
-import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
@@ -56,6 +55,7 @@ import io.legado.app.help.ai.AiChapterPurifyService
 import io.legado.app.help.ai.AI_CREATION_EPHEMERAL_BOOK
 import io.legado.app.help.ai.AiCreationConfig
 import io.legado.app.help.ai.AiCreationSessionHolder
+import io.legado.app.help.book.AudioTextFusion
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.BookImgClick
 import io.legado.app.help.book.ContentProcessor
@@ -133,6 +133,7 @@ import io.legado.app.ui.book.source.edit.BookSourceEditActivity
 import io.legado.app.ui.book.toc.TocActivityResult
 import io.legado.app.ui.book.toc.rule.TxtTocRuleDialog
 import io.legado.app.ui.browser.WebViewActivity
+import io.legado.app.ui.code.CodeEditActivity
 import io.legado.app.ui.dict.DictDialog
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.login.SourceLoginActivity
@@ -235,6 +236,29 @@ class ReadBookActivity : BaseReadBookActivity(),
                 reloadCurrentChapterForBookmark()
             }
         }
+    /** 配图备注直跳全屏编辑：待写回记录的 bookUrl + src，返回后按此找回记录 */
+    private var pendingIllustrationNote: Pair<String, String>? = null
+    private val illustrationNoteEditLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val text = result.data?.getStringExtra("text")
+            val pending = pendingIllustrationNote
+            pendingIllustrationNote = null
+            if (result.resultCode == RESULT_OK && text != null && pending != null) {
+                lifecycleScope.launch(IO) {
+                    val record = appDb.bookIllustrationDao.getByBook(pending.first)
+                        .firstOrNull { it.imageSrcsFromJson().contains(pending.second) }
+                    if (record != null) {
+                        //每图备注优先写回 srcNotes；老记录/单图/统一备注走 note 字段
+                        val updated = if (record.srcNotesMap().containsKey(pending.second)) {
+                            record.withSrcNote(pending.second, text)
+                        } else {
+                            record.copy(note = text)
+                        }
+                        appDb.bookIllustrationDao.update(updated)
+                    }
+                }
+            }
+        }
     private val searchContentActivity =
         registerForActivityResult(StartActivityContract(SearchContentActivity::class.java)) {
             val data = it.data ?: return@registerForActivityResult
@@ -309,6 +333,8 @@ class ReadBookActivity : BaseReadBookActivity(),
     private var bookChanged = false
     private var bookmarkLoadChapterIndex = -1
     private var finishReadAloudBackstage = false
+    /** 回退设置音频书直进听书页的 handoff 模式，upContent（当前章节显示完成）时消费一次 */
+    private var pendingDirectAudioPlayMode: String? = null
     private val readAloudPanelFadeDuration = 140L
     private enum class ReadAloudPanelPresentation {
         HIDDEN,
@@ -350,6 +376,7 @@ class ReadBookActivity : BaseReadBookActivity(),
     @SuppressLint("ClickableViewAccessibility")
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
+        pendingDirectAudioPlayMode = intent.getStringExtra(EXTRA_DIRECT_AUDIO_PLAY)
         binding.cursorLeft.setColorFilter(accentColor)
         binding.cursorRight.setColorFilter(accentColor)
         binding.cursorLeft.setOnTouchListener(this)
@@ -409,15 +436,15 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun onPostCreate(savedInstanceState: Bundle?) {
         super.onPostCreate(savedInstanceState)
         viewModel.initReadBookConfig(intent)
-        Looper.myQueue().addIdleHandler {
+        binding.readView.doOnLayout {
             viewModel.initData(intent)
-            false
         }
         justInitData = true
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        pendingDirectAudioPlayMode = intent.getStringExtra(EXTRA_DIRECT_AUDIO_PLAY)
         viewModel.initData(intent)
     }
 
@@ -453,6 +480,7 @@ class ReadBookActivity : BaseReadBookActivity(),
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onResume() {
         super.onResume()
+        io.legado.app.help.agent.mcp.AgentReading.attach(this) { binding.readView.agentSelection() }
         ReadBook.readStartTime = System.currentTimeMillis()
         if (bookChanged) {
             bookChanged = false
@@ -488,6 +516,7 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     override fun onPause() {
+        io.legado.app.help.agent.mcp.AgentReading.detach(this)
         super.onPause()
         autoPageStop()
         backupJob?.cancel()
@@ -1507,6 +1536,10 @@ class ReadBookActivity : BaseReadBookActivity(),
                 stageSelectedText()
                 return true
             }
+            R.id.menu_edit_config -> {
+                onMenuConfigRequested()
+                return true
+            }
         }
         return false
     }
@@ -1563,10 +1596,6 @@ class ReadBookActivity : BaseReadBookActivity(),
         if (prompt.isEmpty()) return
         if (AppConfig.aiCurrentProvider?.baseUrl.isNullOrBlank() || AppConfig.aiCurrentModelConfig == null) {
             toastOnUi(R.string.ai_missing_config)
-            return
-        }
-        if (!AppConfig.aiAssistantEnabled) {
-            toastOnUi(R.string.ai_not_enabled)
             return
         }
         val book = ReadBook.book
@@ -1710,6 +1739,40 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     /**
+     * 回退设置：音频书直进沉浸式听书页 handoff。upContent（当前章节显示完成，
+     * 字幕已知）是唯一判定点：有缓存的书瞬间完成即直达，无缓存的书加载完
+     * 无字幕才跳转；标记只消费一次，后续翻章不受影响。
+     */
+    private fun consumeDirectAudioPlayHandoff() {
+        val mode = pendingDirectAudioPlayMode ?: return
+        pendingDirectAudioPlayMode = null
+        if (isFinishing || isDestroyed) return
+        val book = ReadBook.book
+        if (book == null || !book.isAudio) {
+            return
+        }
+        if (mode == DIRECT_AUDIO_PLAY_IF_NO_SUBTITLE) {
+            // 章节还没就绪不消费标记，等下一次 upContent 再判；加载失败留在阅读页暴露错误
+            val chapter = ReadBook.curTextChapter?.chapter ?: return
+            if (AudioTextFusion.effectiveLyric(chapter).isNotBlank()) {
+                pendingDirectAudioPlayMode = null
+                return
+            }
+        }
+        pendingDirectAudioPlayMode = null
+        ReadAloud.openAudioPlayActivity(this)
+        // 自动播放语义与朗读按钮前两个分支一致：未在播则开播，已暂停则继续；已在播不打扰
+        if (AppConfig.audioBookDirectAudioPlayAutoPlay) {
+            if (!BaseReadAloudService.isRun) {
+                ReadBook.readAloud()
+            } else if (BaseReadAloudService.pause) {
+                ReadAloud.resume(this)
+            }
+        }
+        finish()
+    }
+
+    /**
      * 更新内容
      */
     override fun upContent(
@@ -1721,6 +1784,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             binding.readView.upContent(relativePosition, resetPageOffset)
             if (relativePosition == 0) {
                 upSeekBarProgress()
+                consumeDirectAudioPlayHandoff()
             }
             loadStates = false
             success?.invoke()
@@ -2778,14 +2842,20 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun onImageLongPress(x: Float, y: Float, src: String) {
         val items = arrayListOf<SelectItem<String>>()
         if (src.startsWith(IllustrationHelp.SRC_PREFIX)) {
-            // 配图：只保留保存（前）与删除（后），多图时增加"保存所有"
-            items.add(SelectItem(getString(R.string.illustration_save_to_album), "saveToAlbum"))
-            if (illustrationImageCount(src) >= 2) {
-                items.add(
-                    SelectItem(getString(R.string.illustration_save_all), "saveAllIllustrations")
-                )
+            if (IllustrationHelp.isAudioSrc(src)) {
+                // 配图音频块：长按菜单只有查看备注
+                items.add(SelectItem(getString(R.string.illustration_view_note), "viewIllustrationNote"))
+            } else {
+                // 配图：保存（前）与删除（后），多图时增加"保存所有"，查看备注放删除之前
+                items.add(SelectItem(getString(R.string.illustration_save_to_album), "saveToAlbum"))
+                if (illustrationImageCount(src) >= 2) {
+                    items.add(
+                        SelectItem(getString(R.string.illustration_save_all), "saveAllIllustrations")
+                    )
+                }
+                items.add(SelectItem(getString(R.string.illustration_view_note), "viewIllustrationNote"))
+                items.add(SelectItem(getString(R.string.illustration_delete), "deleteIllustration"))
             }
-            items.add(SelectItem(getString(R.string.illustration_delete), "deleteIllustration"))
         } else {
             // 普通图片：完全保留原始菜单
             items.add(SelectItem(getString(R.string.show), "show"))
@@ -2801,6 +2871,7 @@ class ReadBookActivity : BaseReadBookActivity(),
                 "refresh" -> viewModel.refreshImage(src)
                 "saveToAlbum" -> saveIllustrationToAlbum(src)
                 "saveAllIllustrations" -> saveAllIllustrations(src)
+                "viewIllustrationNote" -> showIllustrationNote(src)
                 "deleteIllustration" -> deleteIllustration(src)
                 "save" -> {
                     val path = ACache.get().getAsString(AppConst.imagePathKey)
@@ -2833,6 +2904,21 @@ class ReadBookActivity : BaseReadBookActivity(),
         return appDb.bookIllustrationDao.getByBook(book.bookUrl)
             .filter { it.imageSrcsFromJson().contains(src) }
             .sumOf { it.imageSrcsFromJson().size }
+    }
+
+    /** 查看配图备注：直跳全屏编辑器，保存后直接写回该记录，不再经过中间预览 */
+    private fun showIllustrationNote(src: String) {
+        val book = ReadBook.book ?: return
+        val record = appDb.bookIllustrationDao.getByBook(book.bookUrl)
+            .firstOrNull { it.imageSrcsFromJson().contains(src) } ?: return
+        pendingIllustrationNote = book.bookUrl to src
+        illustrationNoteEditLauncher.launch(
+            Intent(this, CodeEditActivity::class.java).apply {
+                putExtra("text", record.srcNotesMap()[src] ?: record.note)
+                putExtra("title", getString(R.string.illustration_note))
+                putExtra("languageName", "text.html.markdown")
+            }
+        )
     }
 
     private fun saveIllustrationToAlbum(src: String) {
@@ -3676,6 +3762,10 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     companion object {
         const val RESULT_DELETED = 100
+        /** 回退设置音频书直进听书页：intent extra，值为 handoff 模式 */
+        const val EXTRA_DIRECT_AUDIO_PLAY = "directAudioPlay"
+        const val DIRECT_AUDIO_PLAY_ALL = "all"
+        const val DIRECT_AUDIO_PLAY_IF_NO_SUBTITLE = "ifNoSubtitle"
         private var activeActivityRef: WeakReference<ReadBookActivity>? = null
 
         fun activeActivity(): ReadBookActivity? = activeActivityRef?.get()

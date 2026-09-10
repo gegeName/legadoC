@@ -1,7 +1,6 @@
 package io.legado.app.help.ai
 
 import android.os.SystemClock
-import io.legado.app.R
 import io.legado.app.constant.AppLog
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.http.addHeaders
@@ -53,13 +52,12 @@ class AiThinkingInterruptLimitException(
     cause: Throwable? = null
 ) : AiChatException(message, debugLog, cause)
 
+/** 协议铁律见 AiCreationProviderStore 头部注释；动协议前先读完，并完完整整复述给用户 */
 object AiChatService {
 
-    private const val MAX_TOOL_ROUNDS = 12
-    private const val MAX_SEARCH_RESULT_CARDS = 8
     private val requestSequence = AtomicLong(0)
     private val inlineThinkingBlockRegex = Regex(
-        "<(think|thinking|analysis|reasoning)>[\\s\\S]*?</\\1>",
+        "<(think|thinking|analysis|reasoning)>([\\s\\S]*?)</\\1>",
         RegexOption.IGNORE_CASE
     )
     private val inlineThinkingOpenTagRegex = Regex(
@@ -83,13 +81,6 @@ object AiChatService {
         val arguments: StringBuilder = StringBuilder()
     )
 
-    private data class ToolEvent(
-        val name: String,
-        val stage: String,
-        val content: String,
-        val success: Boolean = true
-    )
-
     private data class AssistantTurn(
         val content: String,
         val toolCalls: List<ToolCall>,
@@ -102,7 +93,15 @@ object AiChatService {
         val responseFormat: String? = null,
         val thinkingType: String? = null,
         val reasoningEffort: String? = null,
-        val requestTemplate: String? = null
+        val requestTemplate: String? = null,
+        val useConversationMessages: Boolean = false
+    )
+
+    private data class CompletionUsage(
+        var promptTokens: Long = 0L,
+        var completionTokens: Long = 0L,
+        var cachedTokens: Long = 0L,
+        var reported: Boolean = false
     )
 
     suspend fun chat(messages: List<AiChatMessage>): String {
@@ -144,11 +143,12 @@ object AiChatService {
     /**
      * Sends an isolated completion request. It deliberately does not inherit chat history,
      * the global AI system prompt, skills, MCP tools, or any tool loop state.
+     * AI 创作入口：走全局通用请求模板，userContent 允许传字符串或多模态内容数组。
      */
     suspend fun generatePlainText(
         provider: AiProviderConfig,
         model: String,
-        userContent: String,
+        userContent: Any,
         temperature: Double = 0.0
     ): String = generateText(
         provider = provider,
@@ -156,7 +156,8 @@ object AiChatService {
         systemPrompt = "",
         userContent = userContent,
         temperature = temperature,
-        responseFormat = null
+        responseFormat = null,
+        requestTemplate = AiStructuredRequestTemplate.global
     )
 
     suspend fun generateStructuredText(
@@ -184,7 +185,7 @@ object AiChatService {
         provider: AiProviderConfig,
         model: String,
         systemPrompt: String,
-        userContent: String,
+        userContent: Any,
         temperature: Double,
         responseFormat: String?,
         requestTemplate: String? = null,
@@ -209,7 +210,7 @@ object AiChatService {
             append("url=${resolveChatUrl(baseUrl)}").append('\n')
             append("model=$model").append('\n')
             append("provider=${provider.name}").append('\n')
-            append("messageChars=${systemPrompt.length + userContent.length}").append('\n')
+            append("messageChars=${systemPrompt.length + contentChars(userContent)}").append('\n')
         }
         return try {
             val turn = requestCompletionStream(
@@ -247,6 +248,12 @@ object AiChatService {
                 cause = throwable
             )
         }
+    }
+
+    /** userContent 可能是字符串或多模态内容数组，日志统一按字符串化后计长 */
+    private fun contentChars(content: Any): Int = when (content) {
+        is String -> content.length
+        else -> content.toString().length
     }
 
     /** Sends a minimal completion through the same endpoint used by real AI features. */
@@ -304,34 +311,45 @@ object AiChatService {
         require(baseUrl.isNotBlank()) { "供应商 API 地址为空" }
         require(model.isNotBlank()) { "模型未配置" }
 
-        val tools = runCatching { AiToolRegistry.resolveAvailableTools() }.getOrDefault(emptyList())
-        val conversation = buildConversation(messages)
+        val conversation = buildPlainConversation(messages)
         val requestLog = StringBuilder().apply {
+            append("purpose=plain_chat").append('\n')
             append("url=${resolveChatUrl(baseUrl)}").append('\n')
             append("model=$model").append('\n')
             append("provider=${provider?.name.orEmpty()}").append('\n')
-            append("tools=${tools.joinToString { it.name }}").append('\n')
+            append("tools=").append('\n')
         }
-
-        return runCatching {
-            executeToolLoop(
+        return try {
+            val turn = requestCompletionStream(
                 baseUrl = baseUrl,
                 model = model,
                 providerApiKey = provider?.apiKey.orEmpty(),
                 providerHeaders = provider?.headers.orEmpty(),
-                conversation = conversation,
-                tools = tools,
+                messages = conversation,
+                tools = emptyList(),
                 requestLog = requestLog,
+                round = 1,
                 onPartial = onPartial,
                 onThinking = onThinking,
                 onStatus = onStatus,
-                includeStructuredBlocks = includeStructuredBlocks,
-                requestTemplate = AiChapterPurifyConfig.requestTemplate
+                options = CompletionRequestOptions(
+                    requestTemplate = AiStructuredRequestTemplate.global,
+                    useConversationMessages = true
+                )
             )
-        }.getOrElse { throwable ->
-            if (throwable is AiChatException) {
-                throw throwable
+            if (turn.toolCalls.isNotEmpty()) {
+                throw AiChatException(
+                    message = "普通对话未提供工具，但模型返回了工具调用",
+                    debugLog = requestLog.toString()
+                )
             }
+            turn.content.takeIf { it.isNotBlank() } ?: throw AiChatException(
+                message = "模型没有返回内容",
+                debugLog = requestLog.toString()
+            )
+        } catch (throwable: Throwable) {
+            if (throwable is CancellationException) throw throwable
+            if (throwable is AiChatException) throw throwable
             throw AiChatException(
                 message = throwable.message ?: throwable.javaClass.simpleName,
                 debugLog = requestLog.toString(),
@@ -340,225 +358,20 @@ object AiChatService {
         }
     }
 
-    private suspend fun executeToolLoop(
-        baseUrl: String,
-        model: String,
-        providerApiKey: String,
-        providerHeaders: String,
-        conversation: MutableList<JSONObject>,
-        tools: List<AiResolvedTool>,
-        requestLog: StringBuilder,
-        onPartial: (String) -> Unit,
-        onThinking: (String) -> Unit,
-        onStatus: (JSONObject) -> Unit,
-        includeStructuredBlocks: Boolean,
-        requestTemplate: String,
-        onStreamProgress: suspend (AiStreamProgress) -> Unit = {}
-    ): String {
-        val toolMap = tools.associateBy { it.name }
-        val searchResultCards = JSONArray()
-        val toolEvents = JSONArray()
-        repeat(MAX_TOOL_ROUNDS) { round ->
-            val assistantTurn = requestCompletionStream(
-                baseUrl = baseUrl,
-                model = model,
-                providerApiKey = providerApiKey,
-                providerHeaders = providerHeaders,
-                messages = conversation,
-                tools = tools,
-                requestLog = requestLog,
-                round = round + 1,
-                onPartial = onPartial,
-                onThinking = onThinking,
-                onStreamProgress = onStreamProgress,
-                options = CompletionRequestOptions(requestTemplate = requestTemplate)
-            )
-            conversation += assistantTurn.rawMessage
-            if (assistantTurn.toolCalls.isEmpty()) {
-                val content = assistantTurn.content
-                if (content.isBlank()) {
-                    throw AiChatException(
-                        message = "模型没有返回内容",
-                        debugLog = requestLog.toString()
-                    )
-                }
-                return if (includeStructuredBlocks) {
-                    appendStructuredBlocks(content, searchResultCards, toolEvents)
-                } else {
-                    content
-                }
-            }
-            assistantTurn.toolCalls.forEach { toolCall ->
-                onStatus(
-                    JSONObject().apply {
-                        put("key", toolCall.id.ifBlank { toolCall.name })
-                        put("kind", "tool")
-                        put("name", toolCall.name)
-                        put("stage", "call")
-                        put("label", appCtx.getString(R.string.ai_tool_status_calling))
-                        put("content", toolCall.arguments)
-                        put("success", true)
+    private fun buildPlainConversation(messages: List<AiChatMessage>): List<JSONObject> {
+        return buildList {
+            messages.forEach { message ->
+                add(JSONObject().apply {
+                    put("role", if (message.role == AiChatMessage.Role.USER) "user" else "assistant")
+                    if (message.role == AiChatMessage.Role.ASSISTANT) {
+                        val (content, reasoning) = splitInlineThinking(message.content)
+                        put("content", content)
+                        if (reasoning.isNotBlank()) put("reasoning_content", reasoning)
+                    } else {
+                        put("content", message.content)
                     }
-                )
-                toolEvents.put(
-                    JSONObject().apply {
-                        put("name", toolCall.name)
-                        put("stage", "call")
-                        put("content", toolCall.arguments)
-                        put("success", true)
-                    }
-                )
-                val result = executeToolCall(toolCall, toolMap)
-                collectSearchResultCards(toolCall, result, searchResultCards)
-                val resultSuccess = parseToolResultSuccess(result)
-                toolEvents.put(
-                    JSONObject().apply {
-                        put("name", toolCall.name)
-                        put("stage", "result")
-                        put("content", result)
-                        put("success", resultSuccess)
-                    }
-                )
-                onStatus(
-                    JSONObject().apply {
-                        put("key", toolCall.id.ifBlank { toolCall.name })
-                        put("kind", "tool")
-                        put("name", toolCall.name)
-                        put("stage", "result")
-                        put(
-                            "label",
-                            appCtx.getString(
-                                if (resultSuccess) R.string.ai_tool_status_done else R.string.ai_tool_status_failed
-                            )
-                        )
-                        put("content", result)
-                        put("success", resultSuccess)
-                    }
-                )
-                conversation += JSONObject().apply {
-                    put("role", "tool")
-                    put("tool_call_id", toolCall.id)
-                    put("content", result)
-                }
-            }
-        }
-        conversation += JSONObject().apply {
-            put("role", "system")
-            put(
-                "content",
-                appCtx.getString(R.string.ai_tool_round_limit_system_prompt)
-            )
-        }
-        val finalTurn = requestCompletionStream(
-            baseUrl = baseUrl,
-            model = model,
-            providerApiKey = providerApiKey,
-            providerHeaders = providerHeaders,
-            messages = conversation,
-            tools = emptyList(),
-            requestLog = requestLog,
-            round = MAX_TOOL_ROUNDS + 1,
-            onPartial = onPartial,
-            onThinking = onThinking,
-            onStreamProgress = onStreamProgress,
-            options = CompletionRequestOptions(requestTemplate = requestTemplate)
-        )
-        if (finalTurn.content.isBlank()) {
-            throw AiChatException(
-                message = appCtx.getString(R.string.ai_tool_round_limit_summary),
-                debugLog = requestLog.toString()
-            )
-        }
-        return if (includeStructuredBlocks) {
-            appendStructuredBlocks(finalTurn.content, searchResultCards, toolEvents)
-        } else {
-            finalTurn.content
-        }
-    }
-
-    private fun collectSearchResultCards(
-        toolCall: ToolCall,
-        result: String,
-        cards: JSONArray
-    ) {
-        if (toolCall.name != "search_book_source") return
-        runCatching {
-            val results = JSONObject(result).optJSONArray("results") ?: return
-            for (index in 0 until results.length()) {
-                if (cards.length() >= MAX_SEARCH_RESULT_CARDS) break
-                val item = results.optJSONObject(index) ?: continue
-                if (item.optString("bookUrl").isBlank() || item.optString("origin").isBlank()) continue
-                cards.put(JSONObject().apply {
-                    put("name", item.optString("name").take(80))
-                    put("author", item.optString("author").take(60))
-                    put("originName", item.optString("originName").take(60))
-                    put("kind", item.optString("kind").take(80))
-                    put("intro", item.optString("intro").replace(Regex("\\s+"), " ").trim().take(160))
-                    put("latestChapterTitle", item.optString("latestChapterTitle").take(80))
-                    put("coverUrl", item.optString("coverUrl"))
-                    put("bookUrl", item.optString("bookUrl"))
-                    put("origin", item.optString("origin"))
-                    put("target", item.optString("target"))
                 })
             }
-        }
-    }
-
-    private fun appendStructuredBlocks(content: String, cards: JSONArray, toolEvents: JSONArray): String {
-        if (cards.length() == 0 && toolEvents.length() == 0) return content
-        val payload = JSONObject().apply {
-            put("type", "search_book_results")
-            put("results", cards)
-        }
-        return buildString {
-            append(content.trimEnd())
-            if (toolEvents.length() > 0) {
-                append("\n\n```legado-tool-events\n")
-                append(JSONObject().apply {
-                    put("events", toolEvents)
-                })
-                append("\n```")
-            }
-            if (cards.length() > 0) {
-                append("\n\n```legado-search-results\n")
-                append(payload)
-                append("\n```")
-            }
-        }
-    }
-
-    private fun parseToolResultSuccess(result: String): Boolean {
-        return runCatching {
-            JSONObject(result).optBoolean("ok", true)
-        }.getOrDefault(true)
-    }
-
-    private suspend fun executeToolCall(
-        toolCall: ToolCall,
-        toolMap: Map<String, AiResolvedTool>
-    ): String {
-        val enabled = AppConfig.aiEnabledToolNames.ifEmpty { AiToolRegistry.defaultEnabledTools }
-        if (toolCall.name !in enabled) {
-            return JSONObject().apply {
-                put("ok", false)
-                put("error", "Tool is disabled: ${toolCall.name}")
-            }.toString()
-        }
-        val resolvedTool = toolMap[toolCall.name]
-        if (resolvedTool == null) {
-            return JSONObject().apply {
-                put("ok", false)
-                put("error", "Unknown tool: ${toolCall.name}")
-            }.toString()
-        }
-        return runCatching {
-            val arguments = toolCall.arguments.trim().takeIf { it.isNotBlank() }?.let(::JSONObject)
-            resolvedTool.execute(arguments)
-        }.getOrElse { throwable ->
-            JSONObject().apply {
-                put("ok", false)
-                put("error", throwable.message ?: throwable.javaClass.simpleName)
-            }.toString()
         }
     }
 
@@ -573,6 +386,7 @@ object AiChatService {
         round: Int,
         onPartial: (String) -> Unit,
         onThinking: (String) -> Unit,
+        onStatus: (JSONObject) -> Unit = {},
         onRequestAccepted: suspend () -> Unit = {},
         onStreamProgress: suspend (AiStreamProgress) -> Unit = {},
         options: CompletionRequestOptions = CompletionRequestOptions(),
@@ -592,6 +406,7 @@ object AiChatService {
                     round = round,
                     onPartial = onPartial,
                     onThinking = onThinking,
+                    onStatus = onStatus,
                     onRequestAccepted = onRequestAccepted,
                     onStreamProgress = onStreamProgress,
                     options = options,
@@ -633,6 +448,7 @@ object AiChatService {
         round: Int,
         onPartial: (String) -> Unit,
         onThinking: (String) -> Unit,
+        onStatus: (JSONObject) -> Unit,
         onRequestAccepted: suspend () -> Unit = {},
         onStreamProgress: suspend (AiStreamProgress) -> Unit = {},
         options: CompletionRequestOptions = CompletionRequestOptions(),
@@ -643,16 +459,28 @@ object AiChatService {
         val requestHeaders = formatRequestHeaders(providerApiKey, providerHeaders)
         val requestBody = try {
             options.requestTemplate?.let { template ->
-                AiStructuredRequestTemplate.render(
+                val rendered = AiStructuredRequestTemplate.render(
                     template = template,
                     model = model,
                     systemPrompt = messages
                         .filter { it.optString("role") == "system" }
                         .joinToString("\n\n") { it.optString("content") },
+                    //content 可能是字符串或多模态数组：整值原文塞交给模板渲染层处理
                     userContent = messages.lastOrNull { it.optString("role") == "user" }
-                        ?.optString("content")
-                        .orEmpty()
+                        ?.opt("content") ?: ""
                 )
+                if (options.useConversationMessages) {
+                    JSONObject(rendered).apply {
+                        put("messages", JSONArray(messages))
+                        remove("tools")
+                        remove("tool_choice")
+                        remove("parallel_tool_calls")
+                        remove("functions")
+                        remove("function_call")
+                    }.toString()
+                } else {
+                    rendered
+                }
             } ?: buildRequestBody(messages, model, tools, stream = true, options = options)
         } catch (throwable: Throwable) {
             AppLog.putAi(
@@ -666,6 +494,10 @@ object AiChatService {
             )
             throw throwable
         }
+        val requestJson = JSONObject(requestBody)
+        val requestEventId = requestId.toString()
+        onStatus(JSONObject().put("type", "model.request").put("requestId", requestEventId)
+            .put("display", true))
         val idleTimeoutSeconds = AiRequestTimeoutConfig.sseIdleTimeoutSeconds
         val generationTimeoutSeconds = AiRequestTimeoutConfig.generationTimeoutSeconds
         val thinkingInterruptSeconds = AiRequestTimeoutConfig.thinkingInterruptSeconds
@@ -776,7 +608,9 @@ object AiChatService {
             val reasoningRendered = StringBuilder()
             val rawPayload = StringBuilder()
             val toolCallBuilders = linkedMapOf<Int, ToolCallBuilder>()
+            val usage = CompletionUsage()
             var latestProgress: AiStreamProgress? = null
+            var firstTokenAt = 0L
             var lastProgressLogAt = Long.MIN_VALUE
             var lastStreamEventAt = streamStartedAt
             try {
@@ -806,6 +640,7 @@ object AiChatService {
                                 rendered = rendered,
                                 reasoningRendered = reasoningRendered,
                                 toolCallBuilders = toolCallBuilders,
+                                usage = usage,
                                 onPartial = onPartial,
                                 onThinking = onThinking,
                                 streamStartedAt = streamStartedAt,
@@ -821,6 +656,11 @@ object AiChatService {
                                     )
                                     lastStreamEventAt = now
                                     latestProgress = enrichedProgress
+                                    if (firstTokenAt == 0L &&
+                                        (enrichedProgress.reasoningChars > 0 || enrichedProgress.contentChars > 0)
+                                    ) {
+                                        firstTokenAt = now
+                                    }
                                     if (lastProgressLogAt == Long.MIN_VALUE || now - lastProgressLogAt >= 1_000L) {
                                         lastProgressLogAt = now
                                         AppLog.putAi(
@@ -903,6 +743,16 @@ object AiChatService {
                 if (fallback.isNotBlank()) {
                     val visibleFallback = stripInlineThinking(fallback, onThinking)
                     onPartial(visibleFallback)
+                    emitPlainChatCompletionStatus(
+                        onStatus = onStatus,
+                        requestId = requestEventId,
+                        requestBody = requestJson,
+                        usage = usage,
+                        content = visibleFallback,
+                        reasoning = reasoningRendered.toString(),
+                        startedAt = streamStartedAt,
+                        firstTokenAt = firstTokenAt
+                    )
                     return AssistantTurn(
                         visibleFallback,
                         emptyList(),
@@ -911,6 +761,16 @@ object AiChatService {
                     )
                 }
             }
+            emitPlainChatCompletionStatus(
+                onStatus = onStatus,
+                requestId = requestEventId,
+                requestBody = requestJson,
+                usage = usage,
+                content = rendered.toString(),
+                reasoning = reasoningRendered.toString(),
+                startedAt = streamStartedAt,
+                firstTokenAt = firstTokenAt
+            )
             return AssistantTurn(
                 content = rendered.toString(),
                 toolCalls = toolCalls,
@@ -1008,6 +868,7 @@ object AiChatService {
         rendered: StringBuilder,
         reasoningRendered: StringBuilder,
         toolCallBuilders: MutableMap<Int, ToolCallBuilder>,
+        usage: CompletionUsage,
         onPartial: (String) -> Unit,
         onThinking: (String) -> Unit,
         streamStartedAt: Long,
@@ -1017,6 +878,14 @@ object AiChatService {
             throw IllegalStateException("模型服务请求失败：$it")
         }
         val root = JSONObject(payload)
+        root.optJSONObject("usage")?.let { rawUsage ->
+            usage.promptTokens = rawUsage.optLong("prompt_tokens", rawUsage.optLong("input_tokens", 0L))
+            usage.completionTokens = rawUsage.optLong("completion_tokens", rawUsage.optLong("output_tokens", 0L))
+            val promptDetails = rawUsage.optJSONObject("prompt_tokens_details")
+            usage.cachedTokens = promptDetails?.optLong("cached_tokens", 0L)
+                ?: rawUsage.optLong("cached_tokens", rawUsage.optLong("cache_read_input_tokens", 0L))
+            usage.reported = true
+        }
         val choice = root.optJSONArray("choices")?.optJSONObject(0)
         val delta = choice?.optJSONObject("delta") ?: choice?.optJSONObject("message") ?: JSONObject()
         val reasoningText = extractContentText(delta.opt("reasoning_content"))
@@ -1024,7 +893,7 @@ object AiChatService {
             .ifBlank { extractContentText(delta.opt("thinking")) }
         if (reasoningText.isNotBlank()) {
             reasoningRendered.append(reasoningText)
-            onThinking(reasoningText)
+            onThinking(reasoningRendered.toString())
         }
         val deltaText = extractContentText(delta.opt("content"))
         if (deltaText.isNotEmpty()) {
@@ -1129,6 +998,36 @@ object AiChatService {
         return ((outputChars + 3) / 4).coerceAtLeast(0)
     }
 
+    private fun emitPlainChatCompletionStatus(
+        onStatus: (JSONObject) -> Unit,
+        requestId: String,
+        requestBody: JSONObject,
+        usage: CompletionUsage,
+        content: String,
+        reasoning: String,
+        startedAt: Long,
+        firstTokenAt: Long
+    ) {
+        val elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+        val ttftMs = if (firstTokenAt > 0L) (firstTokenAt - startedAt).coerceAtLeast(0L) else elapsedMs
+        if (!usage.reported) {
+            usage.promptTokens = estimateTokens(requestBody.optJSONArray("messages")?.toString().orEmpty())
+            usage.completionTokens = estimateTokens(content) + estimateTokens(reasoning)
+        }
+        onStatus(JSONObject().put("type", "model.response").put("requestId", requestId)
+            .put("elapsedMs", elapsedMs))
+        onStatus(JSONObject().put("type", "model.usage").put("requestId", requestId)
+            .put("promptTokens", usage.promptTokens).put("completionTokens", usage.completionTokens)
+            .put("cachedTokens", usage.cachedTokens).put("elapsedMs", elapsedMs).put("ttftMs", ttftMs)
+            .put("display", true).put("estimated", !usage.reported))
+    }
+
+    private fun estimateTokens(text: String): Long {
+        var cjk = 0L
+        text.forEach { if (it.code >= 0x2E80) cjk++ }
+        return cjk + ((text.length.toLong() - cjk + 3L) / 4L)
+    }
+
     private fun buildAssistantRawMessage(
         content: String,
         toolCalls: List<ToolCall>,
@@ -1163,94 +1062,6 @@ object AiChatService {
                 )
             }
         }
-    }
-
-    private fun buildConversation(messages: List<AiChatMessage>): MutableList<JSONObject> {
-        val conversation = mutableListOf<JSONObject>()
-        conversation += JSONObject().apply {
-            put("role", "system")
-            put("content", AppConfig.aiSystemPrompt.ifBlank { AppConfig.DEFAULT_AI_SYSTEM_PROMPT })
-        }
-        AppConfig.aiEnabledSkills.forEach { skill ->
-            conversation += JSONObject().apply {
-                put("role", "system")
-                put(
-                    "content",
-                    buildString {
-                        append("以下是用户启用的真实 SKILL.md，请把它作为当前 agent 的能力规范执行。")
-                        append("Skill 名称：")
-                        append(skill.name)
-                        if (skill.description.isNotBlank()) {
-                            append("\nSkill 描述：")
-                            append(skill.description)
-                        }
-                        if (skill.sourceUrl.isNotBlank()) {
-                            append("\nSkill 来源：")
-                            append(skill.sourceUrl)
-                        }
-                        append("\n\n")
-                        append(skill.content)
-                    }
-                )
-            }
-        }
-        if (requiresBookshelfTool(messages)) {
-            conversation += JSONObject().apply {
-                put("role", "system")
-                put(
-                    "content",
-                    "本轮用户请求涉及本地书架、书籍详情、阅读记录、分组、标签或书源搜索。回复正文前必须先调用合适的本地工具；不要只说明将要查询。需要选择书源时先调用 list_book_sources。search_book_source 的结果会由客户端自动渲染成可点击卡片，回复里不要生成链接、不要输出内部 URL、不要手写 Markdown 打开链接，只需要用自然语言简短说明搜索结果。"
-                )
-            }
-        }
-        messages.takeLast(12).forEach { message ->
-            conversation += JSONObject().apply {
-                put(
-                    "role",
-                    if (message.role == AiChatMessage.Role.USER) "user" else "assistant"
-                )
-                if (message.role == AiChatMessage.Role.ASSISTANT) {
-                    val (visibleContent, reasoningContent) = splitInlineThinking(
-                        stripSearchResultBlocks(message.content)
-                    )
-                    put("content", visibleContent)
-                    if (reasoningContent.isNotBlank()) {
-                        put("reasoning_content", reasoningContent)
-                    }
-                } else {
-                    put("content", stripSearchResultBlocks(message.content))
-                }
-            }
-        }
-        return conversation
-    }
-
-    private fun stripSearchResultBlocks(content: String): String {
-        return searchResultBlockRegex.replace(content, "").trim()
-    }
-
-    private fun requiresBookshelfTool(messages: List<AiChatMessage>): Boolean {
-        val content = messages.lastOrNull { it.role == AiChatMessage.Role.USER }
-            ?.content
-            ?.lowercase()
-            .orEmpty()
-        if (content.isBlank()) return false
-        return listOf(
-            "书架",
-            "书籍",
-            "书名",
-            "作者",
-            "阅读记录",
-            "最近读",
-            "在读",
-            "简介",
-            "书源",
-            "分组",
-            "标签",
-            "分类",
-            "整理",
-            "批量"
-        ).any { content.contains(it) }
     }
 
     private fun parseAssistantTurn(response: JSONObject): AssistantTurn {
