@@ -27,11 +27,13 @@ data class ReviewSnapshotResourceEntry(
     val key: String = "",
     val mimeType: String = "",
     val byteCount: Long = 0L,
+    val processing: String = "unknown",
 )
 
 data class ReviewSnapshotResourceHandle(
     val mimeType: String,
     val inputStream: InputStream,
+    val file: File,
 )
 
 /** Enables an external REVIEW-start epoch check while a GC scan is in flight (ABA guard). */
@@ -176,6 +178,7 @@ object ReviewSnapshotResourceStore {
         url: String,
         mimeType: String,
         source: File,
+        processing: String = "original",
     ): ReviewSnapshotResourceEntry = synchronized(lock) {
         require(url.isNotBlank()) { "评论资源 URL 为空" }
         require(mimeType.isNotBlank()) { "评论资源 MIME 为空: $url" }
@@ -198,6 +201,7 @@ object ReviewSnapshotResourceStore {
             key = key,
             mimeType = mimeType,
             byteCount = source.length(),
+            processing = processing,
         )
         val old = requireDatabase(book)
         val updated = old.resources
@@ -218,7 +222,7 @@ object ReviewSnapshotResourceStore {
         if (entry != null) {
             validateEntry(dir, entry)
         }
-        ReviewSnapshotResourceHandle(entry?.mimeType ?: guessMime(file), FileInputStream(file))
+        ReviewSnapshotResourceHandle(entry?.mimeType ?: guessMime(file), FileInputStream(file), file)
     }
 
     fun copyAllTo(book: Book, targetDir: File) = synchronized(lock) {

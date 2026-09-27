@@ -3,6 +3,7 @@ package io.legado.app.help.config
 import android.content.SharedPreferences
 import android.os.Build
 import io.legado.app.BuildConfig
+import io.legado.app.R
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.LogModule
@@ -902,13 +903,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val reviewImageCompressionMaxBytes: Long
         get() = reviewImageCompressionMaxKb.toLong() * 1024L
 
-    /** 评论快照资源下载线程数；页面与 Heavy 并发由固定调度策略控制。 */
-    var reviewResourceDownloadConcurrency: Int
-        get() = appCtx.getPrefInt(PreferKey.reviewCacheConcurrency, 8)
-        set(value) {
-            appCtx.putPrefInt(PreferKey.reviewCacheConcurrency, value)
-        }
-
     /** 评论打开方式：network / snapshot_first / snapshot_only */
     val reviewOpenMode: String
         get() = appCtx.getPrefString(PreferKey.reviewOpenMode, ReviewOpenMode.NETWORK)
@@ -1635,6 +1629,16 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val onlyLatestBackup get() = appCtx.getPrefBoolean(PreferKey.onlyLatestBackup, true)
 
     val autoCheckNewBackup get() = appCtx.getPrefBoolean(PreferKey.autoCheckNewBackup, true)
+
+    /**
+     * 每次启动检测更新的默认值跟着版本通道走：
+     * 公开版为开，自用版（c 通道）为关，见 update_check_on_start_default 的各通道覆盖。
+     */
+    val updateCheckOnStartDefault: Boolean
+        get() = appCtx.resources.getBoolean(R.bool.update_check_on_start_default)
+
+    val updateCheckOnStart
+        get() = appCtx.getPrefBoolean(PreferKey.updateCheckOnStart, updateCheckOnStartDefault)
 
     val defaultHomePage get() = appCtx.getPrefString(PreferKey.defaultHomePage, "bookshelf")
 
