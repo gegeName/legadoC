@@ -1,6 +1,7 @@
 package io.legado.app.help
 
 import android.net.Uri
+import com.google.gson.JsonObject
 import io.legado.app.R
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.BookMediaType
@@ -22,12 +23,12 @@ import io.legado.app.model.remote.RemoteBookWebDav
 import io.legado.app.utils.AlphanumComparator
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.GSON
+import io.legado.app.utils.GSONStrict
 import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.UrlUtil
 import io.legado.app.utils.compress.ZipUtils
 import io.legado.app.utils.fromJsonObject
 import io.legado.app.utils.getPrefString
-import io.legado.app.utils.isJson
 import io.legado.app.utils.normalizeFileName
 import io.legado.app.utils.removePref
 import io.legado.app.utils.toastOnUi
@@ -417,37 +418,71 @@ object AppWebDav {
         ) + ".json"
     }
 
-    /**
-     * 获取书籍进度
-     */
+    /** 只有确认云端文件不存在才返回 null；下载或解析失败必须中止同步。 */
     suspend fun getBookProgress(book: Book): BookProgress? {
+        val authorization = authorization ?: error("WebDAV 未配置，无法获取进度")
         val url = getProgressUrl(
             book.name,
             book.author,
             BookMediaType.fromBookType(book.type)
         )
-        kotlin.runCatching {
-            val authorization = authorization ?: return null
-            WebDav(url, authorization).download().let { byteArray ->
-                val json = String(byteArray)
-                if (json.isJson()) {
-                    return GSON.fromJsonObject<BookProgress>(json).getOrNull()
+        val webDav = WebDav(url, authorization)
+        val bytes = try {
+            webDav.download()
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
+            AppLog.put("获取书籍进度失败\n${error.localizedMessage}", error)
+            if (!webDav.existsChecked()) return null
+            throw error
+        }
+        // 下载成功就说明文件存在：空文件、null、残缺对象与错误字段均不能当成首同步。
+        val json = bytes.toString(Charsets.UTF_8)
+        val objectValue = GSONStrict.fromJsonObject<JsonObject>(json).getOrThrow()
+        listOf("name", "author", "durChapterIndex", "durChapterPos", "durChapterTime")
+            .forEach { key ->
+                require(objectValue.has(key) && !objectValue[key].isJsonNull) {
+                    "云端进度缺少字段：$key"
                 }
             }
-        }.onFailure {
-            currentCoroutineContext().ensureActive()
-            AppLog.put("获取书籍进度失败\n${it.localizedMessage}", it)
+        // 通用 Gson 的 Int 适配器会把错误类型变成 null/默认 0，数字必须先严格校验。
+        listOf("durChapterIndex", "durChapterPos", "durChapterTime", "mediaType")
+            .filter { objectValue.has(it) }
+            .forEach { key ->
+                val value = objectValue[key]
+                require(value.isJsonPrimitive && value.asJsonPrimitive.isNumber) {
+                    "云端进度字段不是数字：$key"
+                }
+                if (key == "durChapterTime") value.asBigDecimal.longValueExact()
+                else value.asBigDecimal.intValueExact()
+            }
+        val progress = GSONStrict.fromJsonObject<BookProgress>(json).getOrThrow()
+        require(progress.name == book.name && progress.author == book.author &&
+            progress.mediaType == BookMediaType.fromBookType(book.type)) {
+            "云端进度书籍身份不匹配"
         }
-        return null
+        require(progress.durChapterIndex >= 0 && progress.durChapterPos >= 0 &&
+            progress.durChapterTime >= 0) { "云端进度包含非法位置或时间" }
+        return progress
     }
 
     suspend fun downloadAllBookProgress() {
         val authorization = authorization ?: return
         if (!NetworkUtils.isAvailable()) return
-        val bookProgressFiles = WebDav(bookProgressUrl, authorization).listFiles()
+        val bookProgressFiles = try {
+            WebDav(bookProgressUrl, authorization).listFiles()
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            AppLog.put("拉取进度文件列表失败\n${e.localizedMessage}", e)
+            return
+        }
         val map = hashMapOf<String, WebDavFile>()
         bookProgressFiles.forEach {
             map[it.displayName] = it
+            // displayName 来自 URLDecoder.decodeForPath（已解码），
+            // 而 progressFileName 产出的是 UrlUtil.replaceReservedChar 百分号编码名
+            //（空格→%20、#→%23…）。只按一种编码态建索引，会让含这些字符的书名
+            // 永远匹配不到进度文件并被静默跳过，故两种形态都登记。
+            map[UrlUtil.replaceReservedChar(it.displayName)] = it
         }
         appDb.bookDao.all.forEach { book ->
             val progressFileName = getProgressFileName(
@@ -456,20 +491,26 @@ object AppWebDav {
                 BookMediaType.fromBookType(book.type)
             )
             val webDavFile = map[progressFileName]
+            // 必须 return@forEach 跳过当前书，裸 return 会中断整批进度拉取
             webDavFile ?: return@forEach
             if (webDavFile.lastModify <= book.syncTime) {
                 //本地同步时间大于上传时间不用同步
-                return
+                return@forEach
             }
-            getBookProgress(book)?.let { bookProgress ->
-                if (bookProgress.compareWith(book) == BookProgressComparison.REMOTE_NEWER) {
-                    book.durChapterIndex = bookProgress.durChapterIndex
-                    book.durChapterPos = bookProgress.durChapterPos
-                    book.durChapterTitle = bookProgress.durChapterTitle
-                    book.durChapterTime = bookProgress.durChapterTime
-                    book.syncTime = System.currentTimeMillis()
-                    appDb.bookDao.update(book)
-                }
+            val bookProgress = try {
+                getBookProgress(book)
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                AppLog.put("获取书籍进度失败(批量)\n${e.localizedMessage}", e)
+                null
+            } ?: return@forEach
+            if (bookProgress.compareWith(book) == BookProgressComparison.REMOTE_NEWER) {
+                book.durChapterIndex = bookProgress.durChapterIndex
+                book.durChapterPos = bookProgress.durChapterPos
+                book.durChapterTitle = bookProgress.durChapterTitle
+                book.durChapterTime = bookProgress.durChapterTime
+                book.syncTime = System.currentTimeMillis()
+                appDb.bookDao.update(book)
             }
         }
     }

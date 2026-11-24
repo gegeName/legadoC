@@ -44,6 +44,8 @@ import java.net.URI
 @Suppress("MemberVisibilityCanBePrivate", "ConstPropertyName")
 object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
+    const val DEFAULT_BLUETOOTH_READ_ALOUD_SKIP_INTERVAL = 400
+
     /** 评论打开方式取值 */
     object ReviewOpenMode {
         const val NETWORK = "network"
@@ -1637,8 +1639,14 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val updateCheckOnStartDefault: Boolean
         get() = appCtx.resources.getBoolean(R.bool.update_check_on_start_default)
 
+    /**
+     * 自用版（OWN_BUILD）强制关闭并无视已存储的开关值：早期自用版默认值曾是"开"，
+     * 存进 SharedPreferences 的记录会一直压过通道默认值，升级后疑似"没关"。
+     * 自用版只能本机安装新包，GitHub Release 也只发公开版 APK，启动检测更新统一强制关闭。
+     */
     val updateCheckOnStart
-        get() = appCtx.getPrefBoolean(PreferKey.updateCheckOnStart, updateCheckOnStartDefault)
+        get() = !BuildConfig.OWN_BUILD
+            && appCtx.getPrefBoolean(PreferKey.updateCheckOnStart, updateCheckOnStartDefault)
 
     val defaultHomePage get() = appCtx.getPrefString(PreferKey.defaultHomePage, "bookshelf")
 
@@ -1652,12 +1660,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     val keyPageOnLongPress
         get() = appCtx.getPrefBoolean(PreferKey.keyPageOnLongPress, false)
-
-    val volumeKeyPage
-        get() = appCtx.getPrefBoolean(PreferKey.volumeKeyPage, true)
-
-    val volumeKeyPageOnPlay
-        get() = appCtx.getPrefBoolean(PreferKey.volumeKeyPageOnPlay, false)
 
     val illustrationAudioVolumeKey
         get() = appCtx.getPrefBoolean(PreferKey.illustrationAudioVolumeKey, true)
@@ -1790,6 +1792,15 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefInt(PreferKey.readAloudProgressPollInterval, 500).coerceIn(100, 5000)
         set(value) {
             appCtx.putPrefInt(PreferKey.readAloudProgressPollInterval, value.coerceIn(100, 5000))
+        }
+
+    var bluetoothReadAloudSkipInterval: Int
+        get() = appCtx.getPrefInt(
+            PreferKey.bluetoothReadAloudSkipInterval,
+            DEFAULT_BLUETOOTH_READ_ALOUD_SKIP_INTERVAL
+        )
+        set(value) {
+            appCtx.putPrefInt(PreferKey.bluetoothReadAloudSkipInterval, value)
         }
 
     var bookshelfSort: Int

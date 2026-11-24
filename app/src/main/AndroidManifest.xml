@@ -2,9 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-sdk tools:overrideLibrary="com.qmdeve.liquidglass" />
+    <uses-sdk tools:overrideLibrary="com.qmdeve.liquidglass,com.google.mediapipe.tasks.core,com.google.mediapipe.tasks.vision" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -158,9 +162,13 @@
             android:exported="true"
             android:launchMode="singleTask" />
         <!-- 阅读界面 -->
+        <!-- uiMode 声明：日/夜切换时 AppCompat 对本 Activity 就地更新资源配置而不
+             recreate——既保住 recreate=false 链（排版弹窗切日夜）存活的弹窗，又让
+             AppCompat 夜间覆盖始终同步（未声明时跳过同步会让后续 inflate 的界面
+             按旧模式解析资源，出现亮色下白底白字）。 -->
         <activity
             android:name=".ui.book.read.ReadBookActivity"
-            android:configChanges="locale|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout"
+            android:configChanges="locale|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode"
             android:exported="true"
             android:launchMode="singleTask">
             <intent-filter>

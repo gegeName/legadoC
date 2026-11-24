@@ -132,17 +132,17 @@
 
 ### 本机环境与正式命令
 
-- JDK: `C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot`
+- JDK: `D:\AI\audio\jdk-17.0.19.10-hotspot`（Eclipse Adoptium 17.0.19+10）
 - Android SDK: `D:\AI\audio\android-sdk`
-- Gradle user home: `D:\AI\audio\android-gradle-user-home`
+- Gradle user home: `E:\AI\audio\android-gradle-user-home`（与工程同盘）
 - Gradle wrapper: `8.14.4`; compileSdk: `36`
 
 ```powershell
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot'
+$env:JAVA_HOME = 'D:\AI\audio\jdk-17.0.19.10-hotspot'
 $env:ANDROID_HOME = 'D:\AI\audio\android-sdk'
 $env:ANDROID_SDK_ROOT = 'D:\AI\audio\android-sdk'
-$env:GRADLE_USER_HOME = 'D:\AI\audio\android-gradle-user-home'
+$env:GRADLE_USER_HOME = 'E:\AI\audio\android-gradle-user-home'
 $env:Path = @(
   "$env:JAVA_HOME\bin",
   "$env:ANDROID_HOME\cmdline-tools\latest\bin",
@@ -159,6 +159,8 @@ $versionName = '3.26.<MMddHH>' # <MMddHH> uses UTC; appC automatically appends c
 * 任何可能长时间运行的命令都必须监控实际进度；以进程、CPU、日志和产物是否持续变化判断是否仍在运行，不得无限等待，也不得仅凭启动器退出或工具超时误判任务失败。
 * 构建失败时先读取实际错误、文件、行号和异常信息，再判断根因；不得在没有证据时把源码错误、文件锁、缓存问题或内存问题混为一谈并盲目重跑。
 * 只有证据明确指向缓存、Gradle/Kotlin 进程、文件锁或内存问题时，才执行对应的进程清理、冷编译或局部构建目录清理；不得无依据删除整个构建目录，也不得终止不属于本次任务的进程。
+* Windows 下 KSP 若报 `this and base files have different roots`，先确认工程与 Gradle 缓存是否跨盘。工程与 `GRADLE_USER_HOME` 应同盘；使用原跨盘增量缓存时，可在该次构建加 `-Pksp.incremental=false`。2026-10-30 通过这两项调整完成自用版构建并交付。
+* Google Maven 发生 TLS 握手失败时，确认网络原因后可在本机构建环境临时使用项目允许的 Maven 镜像，不必改动已提交的仓库配置；2026-10-30 使用镜像后完成自用版构建并交付。
 * 同一检出目录同时只允许一个正式构建。构建结束、中断或失败后，必须清理属于本次构建的残留进程；构建结果以真实日志、退出状态和产物校验为准。
 
 ### 双构建路线（自有 / 开源）
@@ -177,12 +179,12 @@ $versionName = '3.26.<MMddHH>' # <MMddHH> uses UTC; appC automatically appends c
 - 用户未指明构建路线时，"编译/正式编译/交付"一律指自用构建 `assembleAppC`（阅读C-自用），完全沿用"不可变交付约束"与本节的版本、产物规则；不得自行切换成开源构建。
 - 仅当用户明确要求“开源编译”“发布编译”或“oss 编译”时，才执行 `assembleOssRelease`；构建时传入 `-PVERSION_CODE` 和 `-PVERSION_NAME`，版本名不带 `c` 后缀，产物位于 `app\build\outputs\apk\oss\release\`，并使用 `aapt` 和 `apksigner` 验证；公开版固定包名为 `io.legado.app.c`、应用名为 `阅读C`。不得将 `assembleOssRelease` 产物作为自用版交付，也不得将 `assembleAppC` 产物作为公开版发布。
 - 用户明确要求"双编译"时，两个构建都执行：先自用 `assembleAppC`，再开源 `assembleOssRelease`，各自完整走一遍版本传参与产物验证；两包包名不同（自用 `io.legado.app.dev` / 公开 `io.legado.app.c`），互不影响覆盖安装，可共存装在同一设备。
-- 只允许构建两个 release 系产物：自用版 `assembleAppC` 和公开版 `assembleOssRelease`，绝对禁止任何 debug buildType。两个版本统一使用 SDK 自带的 debug 签名，不创建、不使用任何正式密钥；所有 APK 必须通过 `apksigner` 验证。
+- 只允许构建两个 release 系产物：自用版 `assembleAppC` 和公开版 `assembleOssRelease`，绝对禁止任何 debug buildType。自用版（appC）与公开版（oss）统一使用仓库根 `signing/debug.keystore` 签名（与 SDK debug 同口令体系、不同密钥，证书 SHA-256 见 README 签名说明；两版包名不同，覆盖安装靠包名区分）；`signing/` 只存本地、私有备份，公开镜像剥离，公开克隆缺文件时自动回退 SDK debug 签名；所有 APK 必须通过 `apksigner` 验证。
 
 开源源码发布（历史清洗镜像）：
 
 - 远程 `origin`（CCSSNE/legadoC）是公开仓库（默认分支 `own`）。`origin/own` = 本地完整历史剥离专有路径后的清洗镜像；本地 `own` = 完整私有历史，同步推送私有备份仓 `private`（CCSSNE/legadoC-private，已验证 `private:true`）。
-- 所有专有和自用代码必须放在剥离清单指定的路径中，现行专有代码统一放在 `app/src/app`。`AGENTS.md`、`docs`、`tools` 不在剥离范围，会随公开历史发布；新增专有功能前必须确认对应路径已经加入剥离清单。
+- 所有专有和自用代码必须放在剥离清单指定的路径中，现行专有代码统一放在 `app/src/app`；`signing/`（公开版签名密钥）同样只存本地，公开镜像剥离。`AGENTS.md`、`docs`、`tools` 不在剥离范围，会随公开历史发布；新增专有功能前必须确认对应路径已经加入剥离清单。
 - **严禁把本地 `own` 直接 `git push` 到 `origin/own`**：两边历史不同，非快进必被拒（这是防泄露保护，不得绕过）；强推会把专有历史重新公开。（私有备份仓 `private` 收的就是完整历史，直接 `git push private own` 快进属正常操作，不在禁止之列。）
 - 公开源码只能通过仓库根目录的 `publish-oss-source.ps1` 发布。脚本负责临时克隆、剥离专有路径、校验历史、生成公开镜像并推送到 `origin/own`，同时把完整私有历史推送到 `private`。禁止绕过脚本直接把本地 `own` 推送到 `origin/own`。
 - 已有 fork 与 GitHub 服务端缓存可能仍留存清洗前的旧对象；需要彻底清除时联系 GitHub Support（remove sensitive data）。
@@ -192,7 +194,7 @@ $versionName = '3.26.<MMddHH>' # <MMddHH> uses UTC; appC automatically appends c
 ### 产物验证
 
 ```powershell
-$apk = 'D:\AI\audio\legadoC-own\app\build\outputs\apk\app\c\legado_app_<version>.apk'
+$apk = 'E:\AI\audio\legadoC-own\app\build\outputs\apk\app\c\legado_app_<version>.apk'
 & "$env:ANDROID_HOME\build-tools\36.0.0\aapt.exe" dump badging $apk
 & "$env:ANDROID_HOME\build-tools\36.0.0\apksigner.bat" verify --print-certs $apk
 ```
@@ -280,7 +282,7 @@ AI 铁律（死路，见到先复述给用户再定夺）：模型永远只当�
 
 仅保留最近一次已交付版本，下一次覆盖安装必须在此基础上递增：
 
-- 最近一次自用版交付为 `3.26.091507c` / `10898`，2026-09-15，基于提交 `78ed9850`（WebView池仅暂停自身实例，修复创作编辑器白屏）使用 `assembleAppC` 编译成功（`BUILD SUCCESSFUL in 5m 23s`，`75 actionable tasks: 20 executed, 55 up-to-date`）。产物包名 `io.legado.app.dev`、versionName `3.26.091507c`、versionCode `10898`、架构 `arm64-v8a`，`aapt` 确认应用名 `阅读C-自用`（label-zh 逐字匹配）、`apksigner verify` 退出码 0；APK 位于 `app\build\outputs\apk\app\c\legado_app_3.26.091507_10898.apk`（47.84 MB），尚未安装。
-- 最近一次公开版交付为 `3.26.091403` / `10897`，2026-09-14，基于提交 `eb1c1940`（README 追加 2026-09-08 至 09-14 更新记录）使用 `assembleOssRelease` 编译成功（`BUILD SUCCESSFUL in 5m 29s`，`121 actionable tasks: 29 executed, 2 from cache, 90 up-to-date`）。产物包名 `io.legado.app.c`、versionName `3.26.091403`（无 c 后缀）、versionCode `10897`、架构 `arm64-v8a`，`aapt` 确认应用名 `阅读C`（label-zh 逐字匹配）、`apksigner verify` 退出码 0；APK 位于 `app\build\outputs\apk\oss\release\legado_oss_3.26.091403_10897.apk`，已发布正式版 `v3.26.091403`（`prerelease=false`，复查 tag/正文/资产大小与下载 200 均正常）。
+- 最近一次自用版交付为 `3.26.103013c` / `10913`，2026-10-30，基于提交 `99b4ef95`（无新增源码改动，仅重编最新自用版）使用 `assembleAppC` 编译成功（`BUILD SUCCESSFUL in 2m 20s`，`121 actionable tasks: 27 executed, 1 from cache, 93 up-to-date`）。产物包名 `io.legado.app.dev`、versionName `3.26.103013c`、versionCode `10913`、架构 `arm64-v8a`，`aapt` 确认应用名 `阅读C-自用`（label/label-zh 逐字匹配），`apksigner verify --print-certs` 确认证书 SHA-256 为仓库密钥 `70:CB:…:89:5C`、退出码 0；APK 位于 `app\build\outputs\apk\app\c\legado_app_3.26.103013_10913.apk`（49,532,801 字节）。此前交付 `10912`（`3.26.103011c`）及其更早自用版均已被本版覆盖，后续交付继续在 `10913` 基础上单调递增。本次仅正式编译和核验产物，未安装或设备回归。
+- 最近一次公开版交付为 Pre 版 `v3.26.103013` / `10915`（覆盖重发），2026-10-30。首次为 `10914`（release id `429066051`，tag 同名），因与 `10913` 处于同一 UTC 小时、且用户随后又追加了新改动，用户确认选择覆盖重发：旧 Release、tag 与本地产物 `legado_oss_3.26.103013_10914.apk` 已全部删除，`10914` 作废不得引用、不得回退。重发基于提交 `d4738a5e`（新增：日志面板分享入口；保留：书架 diff OOM 修复、图片缓存扩容收敛到堆预算 25%、AppFreezeMonitor 去重；自用版隐藏无效更新开关的改动被 `OWN_BUILD` 限制不在公开版内，`origin/own` 清洗镜像为 `961ea7a6`）使用 `assembleOssRelease` 编译成功（`BUILD SUCCESSFUL in 2m 28s`，`121 actionable tasks: 28 executed, 93 up-to-date`）。产物包名 `io.legado.app.c`、versionName `3.26.103013`（无 c 后缀）、versionCode `10915`，`aapt` 确认应用名 `阅读C`（label-zh 逐字匹配），`apksigner verify --print-certs` 确认证书 SHA-256 为仓库密钥 `70:CB:…:89:5C`、退出码 0；APK 位于 `app\build\outputs\apk\oss\release\legado_oss_3.26.103013_10915.apk`（44,424,373 字节，SHA-256 `412ed6cb…3672bf4` 与服务器资产 digest 一致），已发布 Pre 版 `v3.26.103013`（release id `429076705`，`prerelease=true`，`make_latest=false`，target `own`，正文与源 JSON 逐字比对一致，资产下载 200，Latest 仍为 `v3.26.100717`）；后续公开版在 `10915` 基础上单调递增，且 versionName 小时段（MMddHH）与其不同时可直接使用新值。
 
 每次交付后当场更新本节。历史发布信息应从 Git、GitHub Release 或提交记录查询，不在本文件累积。

@@ -85,6 +85,8 @@ object ReviewSnapshotCapture {
     private val EXPAND_ROUND_INTERVAL_MS get() = ReviewDownloadConfig.Number.STABLE_INTERVAL.value.toLong()
     /** 连续几轮稳定才判定完成（含慢加载评论） */
     private val STABLE_ROUNDS_TO_FINISH get() = ReviewDownloadConfig.Number.STABLE_ROUNDS.value
+    /** 兜底强展连续几轮无新点击即判定收口完成，进入资源冻结。 */
+    private const val FORCE_EXPAND_STABLE_ROUNDS = 2
     /** 章评/书评 tab 点击校验重试上限 */
     private const val MAX_TAB_CLICK_ATTEMPTS = 5
     /** 单个资源抓取超时；传输失败会记录并移除该非关键资源，取消仍会中止快照。 */
@@ -677,8 +679,8 @@ object ReviewSnapshotCapture {
          */
         private var expandLoopActive = false
 
-        /** 楼中楼兜底强展已执行的轮数 */
-        private var forceExpandPasses = 0
+        /** 兜底强展连续几轮无点击的计数，用于提前收口。 */
+        private var forceExpandStableRounds = 0
 
         /** 章评/书评 tab 点击尝试次数 */
         private var tabClickAttempts = 0
@@ -1011,18 +1013,16 @@ object ReviewSnapshotCapture {
                 inlineResources()
                 return
             }
-            forceExpandReplies()
+            forceExpandRemaining()
         }
 
         /**
-         * 楼中楼兜底强展：逐一点击全部未展开的回复 toggle（不限每轮数量），
-         * 直到页面再无“展开 N 条回复”类元素。点击后可能出现新的“加载更多回复”，
-         * 因此按页面稳定状态收敛；页面执行超时必须报错，不能把未展开完的页面当作完整结果。
+         * 补充展开楼中楼，连续无新点击才冻结资源。
+         * 不以固定轮数截断结果；页面执行超时由现有看门狗明确报错。
          */
-        private fun forceExpandReplies() {
+        private fun forceExpandRemaining() {
             if (destroyed) return
-            forceExpandPasses++
-            webView.evaluateJavascript(FORCE_EXPAND_JS) { json ->
+            webView.evaluateJavascript(FORCE_EXPAND_REPLIES_JS) { json ->
                 mHandler.post {
                     if (destroyed) return@post
                     val clicked = parseForceClicked(json) ?: run {
@@ -1033,10 +1033,13 @@ object ReviewSnapshotCapture {
                         "FORCE_EXPAND_PASS",
                         CacheOperationDiagnostics.Metrics(resourceCount = clicked),
                     )
-                    if (clicked > 0) {
-                        mHandler.postDelayed({ forceExpandReplies() }, EXPAND_ROUND_INTERVAL_MS)
-                    } else {
+                    totalExpandClicks += clicked
+                    forceExpandStableRounds =
+                        if (clicked == 0) forceExpandStableRounds + 1 else 0
+                    if (forceExpandStableRounds >= FORCE_EXPAND_STABLE_ROUNDS) {
                         inlineResources()
+                    } else {
+                        mHandler.postDelayed({ forceExpandRemaining() }, EXPAND_ROUND_INTERVAL_MS)
                     }
                 }
             }
@@ -2158,28 +2161,37 @@ object ReviewSnapshotCapture {
             "})()"
     }
 
-    /**
-     * 楼中楼兜底强展脚本：不限每轮数量地点击全部未展开的回复 toggle。
-     * 展开循环受“每轮 6 个 + 轮数上限”约束，懒加载页面的尾部楼中楼会漏点，
-     * 序列化后离线永远打不开；本脚本在序列化前穷尽兜底，由页面自身 JS
-     * 完成展开（不操作 DOM 结构，通用书源均适用）。
-     */
-    private const val FORCE_EXPAND_JS =
+    /** 展开已有回复容器；其余回复按钮只触发一次点击，避免重复事件反向收起。 */
+    private const val FORCE_EXPAND_REPLIES_JS =
         "(function(){" +
-            "var pat=/(展开\\s*\\d*\\s*条回复|展开回复|查看回复|全部回复|更多回复|共\\s*\\d+\\s*条回复|load\\s*more\\s*repl)/i;" +
+            "var expandRe=/(展开回复|展开\\s*\\d*\\s*条回复|更多回复|查看回复|查看全部回复|全部回复|共\\s*\\d+\\s*条回复|load\\s*more\\s*repl|show\\s*more\\s*repl|view\\s*more\\s*repl|expand\\s*repl|\\d+\\s*条回复|\\d+\\s*个回复|\\d+\\s*楼回复)/i;" +
+            "var collapseRe=/(收起|折叠|collapse|hide\\s*(reply|comment|all))/i;" +
             "var clicked=0;" +
+            "document.querySelectorAll('.reply-toggle').forEach(function(t){" +
+            "if(t.getAttribute('data-legado-force-expanded'))return;" +
+            "var box=t.nextElementSibling;" +
+            "if(!box||!box.matches('.replies-container')||!box.children.length)return;" +
+            "box.style.display='block';" +
+            "if(t.classList)t.classList.add('open');" +
+            "t.setAttribute('data-legado-force-expanded','1');" +
+            "clicked++;});" +
+            // 二) 文本兜底：命中展开类词的可点击元素（覆盖无 .reply-toggle 契约类名的平台）
             "var els=document.querySelectorAll('a,button,[role=\"button\"],[onclick],div,span,p');" +
             "for(var i=0;i<els.length;i++){var el=els[i];" +
+            "if(el.getAttribute('data-legado-force-expanded'))continue;" +
+            "var anc=el.parentElement,skip=false;" +
+            "while(anc){if(anc.getAttribute&&anc.getAttribute('data-legado-force-expanded')){skip=true;break;}anc=anc.parentElement;}" +
+            "if(skip)continue;" +
             "var t=(el.innerText||'').trim();" +
-            "if(!t||t.length>30||!pat.test(t))continue;" +
+            "if(!t||t.length>24||!expandRe.test(t)||collapseRe.test(t))continue;" +
             "var r=el.getBoundingClientRect();" +
             "if(r.width<1||r.height<1)continue;" +
-            "if(el.children.length>2)continue;" +
+            "if(el.children.length>0&&!el.matches('a,button,[role=\"button\"],[onclick],.reply-toggle'))continue;" +
+            "el.setAttribute('data-legado-force-expanded','1');" +
             "el.scrollIntoView({block:'center'});" +
             "try{el.click();}catch(e){}" +
-            "try{el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));" +
-            "el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));}catch(e){}" +
             "clicked++;}" +
+            "try{window.scrollTo(0,document.body?document.body.scrollHeight:0);}catch(e){}" +
             "return JSON.stringify({c:clicked});" +
             "})()"
 

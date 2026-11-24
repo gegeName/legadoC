@@ -1,10 +1,13 @@
 package io.legado.app.ui.book.read
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -19,16 +22,22 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
 import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.view.get
+import androidx.core.content.ContextCompat
 import androidx.core.view.doOnLayout
 import androidx.core.view.isVisible
 import androidx.core.view.setPadding
 import androidx.core.view.size
 import androidx.lifecycle.lifecycleScope
 import com.jaredrummler.android.colorpicker.ColorPickerDialogListener
+import com.jaredrummler.android.colorpicker.ColorPickerDialog
+import com.jaredrummler.android.colorpicker.ColorShape
 import com.google.android.material.snackbar.Snackbar
 import io.legado.app.R
 import io.legado.app.constant.AppConst
@@ -85,6 +94,8 @@ import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.dialogs.selector
 import io.legado.app.lib.prefs.ColorPreference.ColorPickerDialogCompat
 import io.legado.app.lib.theme.accentColor
+import io.legado.app.lib.theme.bottomBackground
+import io.legado.app.lib.theme.getPrimaryTextColor
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadAloudPosition
 import io.legado.app.model.ReadAloudPositionUpdate
@@ -104,6 +115,8 @@ import io.legado.app.ui.book.changesource.ChangeChapterSourceDialog
 import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.ui.book.read.config.IllustrationEditDialog
 import io.legado.app.ui.book.read.config.AutoReadDialog
+import io.legado.app.ui.book.read.config.BluetoothKeyMapping
+import io.legado.app.ui.book.read.config.BluetoothKeyMappingDialog
 import io.legado.app.ui.book.read.creation.AiCreationDialog
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.BG_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.READ_MENU_BG_COLOR
@@ -115,6 +128,7 @@ import io.legado.app.ui.book.read.config.ReadAloudDialog
 import io.legado.app.ui.book.read.config.ReadStyleDialog
 import io.legado.app.ui.book.read.config.TipConfigDialog.Companion.TIP_COLOR
 import io.legado.app.ui.book.read.config.TipConfigDialog.Companion.TIP_DIVIDER_COLOR
+import io.legado.app.ui.book.read.eye.EyePageTurner
 import io.legado.app.ui.book.read.page.ContentTextView
 import io.legado.app.ui.book.read.page.FooterCenterAction
 import io.legado.app.ui.book.read.page.ReadView
@@ -143,6 +157,7 @@ import io.legado.app.ui.replace.edit.ReplaceEditActivity
 import io.legado.app.ui.widget.PopupAction
 import io.legado.app.ui.widget.dialog.PhotoDialog
 import io.legado.app.utils.ACache
+import io.legado.app.utils.ColorUtils
 import io.legado.app.utils.Debounce
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.NetworkUtils
@@ -307,6 +322,18 @@ class ReadBookActivity : BaseReadBookActivity(),
     private var illustrationAnchor: IllustrationAnchor? = null
     private var selectedReviewButton: ReviewButton? = null
     private var selectedSyntheticPara: SyntheticParaContent? = null
+    private var eyePageTurner: EyePageTurner? = null
+    private var eyeGazePointColorPreview: View? = null
+    private var eyePageTurnEnabled = ReadBookConfig.eyePageTurnEnabled
+    private var readerResumed = false
+    private val eyeCameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            setEyePageTurnEnabled(true)
+        } else {
+            setEyePageTurnEnabled(false)
+            toastOnUi(R.string.eye_page_permission_required)
+        }
+    }
     val textActionMenu: TextActionMenu by lazy {
         TextActionMenu(this, this)
     }
@@ -371,11 +398,13 @@ class ReadBookActivity : BaseReadBookActivity(),
         NetworkChangedListener(this)
     }
     private var justInitData: Boolean = false
+    private var lastUiNightMode = Configuration.UI_MODE_NIGHT_UNDEFINED
     private var syncDialog: AlertDialog? = null
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
+        lastUiNightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
         pendingDirectAudioPlayMode = intent.getStringExtra(EXTRA_DIRECT_AUDIO_PLAY)
         binding.cursorLeft.setColorFilter(accentColor)
         binding.cursorRight.setColorFilter(accentColor)
@@ -408,6 +437,10 @@ class ReadBookActivity : BaseReadBookActivity(),
         updateReadAloudPageFloating()
         updateReadAloudPanels()
         onBackPressedDispatcher.addCallback(this) {
+            if (eyePageTurner?.isCalibrating == true) {
+                setEyePageTurnEnabled(false)
+                return@addCallback
+            }
             if (binding.readAiPanel.isVisible) {
                 binding.readAiPanel.close()
                 return@addCallback
@@ -450,6 +483,7 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        eyePageTurner?.resetGesture()
         upSystemUiVisibility()
         if (hasFocus) {
             binding.readMenu.upBrightnessState()
@@ -459,9 +493,23 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
+        // 使用上次已应用的快照，不能假定回调入口的 resources 仍然是旧配置。
+        val oldUiMode = lastUiNightMode
         super.onConfigurationChanged(newConfig)
+        eyePageTurner?.stop()
+        eyePageTurner = null
+        startEyePageTurner()
+        lastUiNightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
         upSystemUiVisibility()
         binding.readView.upStatusBar()
+        // 声明 uiMode 后系统日/夜翻转（AUTO 跟随）不再触发重建，按主题模式就地刷新
+        // 阅读界面（与 ReadStyleDialog 就地切日夜同一事件组合：重刷背景/样式/重载内容）。
+        if (oldUiMode != lastUiNightMode) {
+            postEvent(EventBus.UP_CONFIG, arrayListOf(1, 2, 5))
+            if (AppConfig.readBarStyleFollowPage) {
+                postEvent(EventBus.UPDATE_READ_ACTION_BAR, true)
+            }
+        }
     }
 
     override fun onTopResumedActivityChanged(isTopResumedActivity: Boolean) {
@@ -474,12 +522,15 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun onStart() {
         super.onStart()
         activeActivityRef = WeakReference(this)
+        readerInstanceRef = WeakReference(this)
         postEvent(EventBus.READ_BOOK_ACTIVITY_ACTIVE, true)
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onResume() {
         super.onResume()
+        readerResumed = true
+        startEyePageTurner()
         io.legado.app.help.agent.mcp.AgentReading.attach(this) { binding.readView.agentSelection() }
         ReadBook.readStartTime = System.currentTimeMillis()
         if (bookChanged) {
@@ -516,6 +567,8 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     override fun onPause() {
+        readerResumed = false
+        eyePageTurner?.stop()
         io.legado.app.help.agent.mcp.AgentReading.detach(this)
         super.onPause()
         autoPageStop()
@@ -588,7 +641,10 @@ class ReadBookActivity : BaseReadBookActivity(),
                     ReadBook.curTextChapter?.sameTitleRemoved == true
                 upMenu(this)
             },
-            onClick = ::onMenuItemClick
+            onClick = ::onMenuItemClick,
+            onLongClick = { item ->
+                if (item.itemId == R.id.menu_eye_gaze_point) showEyeGazePointSettings()
+            }
         )
     }
 
@@ -610,6 +666,8 @@ class ReadBookActivity : BaseReadBookActivity(),
                     R.id.menu_enable_replace -> item.isChecked = book.getUseReplaceRule()
                     R.id.menu_enable_ai_chapter_purify ->
                         item.isChecked = book.getAiChapterPurifyEnabled()
+                    R.id.menu_eye_page_turn -> item.isChecked = eyePageTurnEnabled
+                    R.id.menu_eye_gaze_point -> item.isChecked = ReadBookConfig.eyePageGazePointEnabled
                     R.id.menu_re_segment -> item.isChecked = book.getReSegment()
                     R.id.menu_offline_review_mode ->
                         item.isChecked = AppConfig.offlineReviewMode
@@ -619,13 +677,22 @@ class ReadBookActivity : BaseReadBookActivity(),
                 }
             }
         }
-        lifecycleScope.launch {
-            val show = ReadBook.inBookshelf && withContext(IO) {
-                AppWebDav.isOk
-            }
-            menu.findItem(R.id.menu_get_progress)?.isVisible = show
-            menu.findItem(R.id.menu_cover_progress)?.isVisible = show
+    }
+
+    /**
+     * 云端进度菜单项常驻（见 R.menu.book_read），因此开启条件不满足时必须在点击后
+     * 给出明确原因，不能让用户点了没有任何反应。
+     */
+    private fun cloudProgressReady(): Boolean {
+        if (!AppWebDav.isOk) {
+            toastOnUi(R.string.webdav_not_configured)
+            return false
         }
+        if (!AppConfig.syncBookProgress) {
+            toastOnUi(R.string.sync_book_progress_disabled)
+            return false
+        }
+        return true
     }
 
     /**
@@ -633,6 +700,9 @@ class ReadBookActivity : BaseReadBookActivity(),
      */
     override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
+            R.id.menu_eye_page_turn -> toggleEyePageTurn()
+            R.id.menu_eye_page_recalibrate -> recalibrateEyePageTurn()
+            R.id.menu_eye_gaze_point -> toggleEyeGazePoint(item)
             R.id.menu_change_source,
             R.id.menu_book_change_source -> {
                 binding.readMenu.runMenuOut()
@@ -777,12 +847,14 @@ class ReadBookActivity : BaseReadBookActivity(),
             }
 
             R.id.menu_get_progress -> ReadBook.book?.let {
+                if (!cloudProgressReady()) return@let
                 viewModel.syncBookProgress(it) { progress ->
                     sureSyncProgress(progress)
                 }
             }
 
             R.id.menu_cover_progress -> ReadBook.book?.let {
+                if (!cloudProgressReady()) return@let
                 ReadBook.uploadProgress(true) { toastOnUi(R.string.upload_book_success) }
             }
 
@@ -802,6 +874,8 @@ class ReadBookActivity : BaseReadBookActivity(),
             }
 
             R.id.menu_effective_replaces -> showDialogFragment<EffectiveReplacesDialog>()
+
+            R.id.menu_bluetooth_key_mapping -> showDialogFragment(BluetoothKeyMappingDialog())
 
             R.id.menu_offline_review_mode -> {
                 AppConfig.offlineReviewMode = !AppConfig.offlineReviewMode
@@ -1019,6 +1093,9 @@ class ReadBookActivity : BaseReadBookActivity(),
         if (menuLayoutIsVisible) {
             return super.onKeyDown(keyCode, event)
         }
+        if (handleBluetoothMediaKey(keyCode)) {
+            return true
+        }
         val longPress = event.repeatCount > 0
         when {
             isPrevKey(keyCode) -> {
@@ -1032,11 +1109,11 @@ class ReadBookActivity : BaseReadBookActivity(),
             }
         }
         when (keyCode) {
-            KeyEvent.KEYCODE_VOLUME_UP -> if (volumeKeyPage(PageDirection.PREV, longPress)) {
+            KeyEvent.KEYCODE_VOLUME_UP -> if (handleVolumeKey(keyCode, longPress)) {
                 return true
             }
 
-            KeyEvent.KEYCODE_VOLUME_DOWN -> if (volumeKeyPage(PageDirection.NEXT, longPress)) {
+            KeyEvent.KEYCODE_VOLUME_DOWN -> if (handleVolumeKey(keyCode, longPress)) {
                 return true
             }
 
@@ -1065,7 +1142,7 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                if (volumeKeyPage(PageDirection.NONE, false)) {
+                if (isVolumeKeyConsumed(keyCode)) {
                     return true
                 }
             }
@@ -1653,21 +1730,45 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     /**
-     * 音量键翻页
+     * 音量键走按键映射表（阅读/朗读双态），无映射则交还系统调音量。
      */
-    private fun volumeKeyPage(direction: PageDirection, longPress: Boolean): Boolean {
-        if (!AppConfig.volumeKeyPage) {
-            return false
-        }
-        if (!AppConfig.volumeKeyPageOnPlay && BaseReadAloudService.isPlay()) {
-            return false
-        }
+    private fun handleVolumeKey(keyCode: Int, longPress: Boolean): Boolean {
+        val key = BluetoothKeyMapping.keyForKeyCode(keyCode)
+            ?.takeIf { !it.isMediaKey } ?: return false
         // 内嵌音频块播放时，按设置决定音量键是否让位给系统调音量（像听书一样）
         if (AppConfig.illustrationAudioVolumeKey && AudioBlockPlayer.isPlaying) {
             return false
         }
-        handleKeyPage(direction, longPress)
-        return true
+        val action = BluetoothKeyMapping.slotAction(key, this)
+        if (action == BluetoothKeyMapping.ACTION_NONE) {
+            return key.consumeWhenNone
+        }
+        if (action == BluetoothKeyMapping.ACTION_PREVIOUS_PAGE
+            || action == BluetoothKeyMapping.ACTION_NEXT_PAGE
+        ) {
+            handleKeyPage(
+                if (action == BluetoothKeyMapping.ACTION_PREVIOUS_PAGE) {
+                    PageDirection.PREV
+                } else {
+                    PageDirection.NEXT
+                },
+                longPress
+            )
+            return true
+        }
+        if (longPress) {
+            return true
+        }
+        return BluetoothKeyMapping.dispatch(action, this, bluetoothUiHandler)
+    }
+
+    private fun isVolumeKeyConsumed(keyCode: Int): Boolean {
+        val key = BluetoothKeyMapping.keyForKeyCode(keyCode)
+            ?.takeIf { !it.isMediaKey } ?: return false
+        if (AppConfig.illustrationAudioVolumeKey && AudioBlockPlayer.isPlaying) {
+            return false
+        }
+        return BluetoothKeyMapping.slotAction(key, this) != BluetoothKeyMapping.ACTION_NONE
     }
 
     private fun handleKeyPage(direction: PageDirection, longPress: Boolean) {
@@ -1704,9 +1805,254 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     private fun keyPage(direction: PageDirection) {
+        eyePageTurner?.resetGesture()
         binding.readView.cancelSelect()
         binding.readView.pageDelegate?.isCancel = false
         binding.readView.pageDelegate?.keyTurnPage(direction)
+    }
+
+    private fun toggleEyePageTurn() {
+        if (eyePageTurnEnabled) {
+            setEyePageTurnEnabled(false)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            toastOnUi(R.string.eye_page_unsupported)
+            return
+        }
+        if (!ReadBookConfig.eyePageTurnHelpShown) {
+            ReadBookConfig.eyePageTurnHelpShown = true
+            alert(getString(R.string.eye_page_turn), getString(R.string.eye_page_help)) {
+                positiveButton(R.string.eye_page_enable) { requestEyePageTurn() }
+                negativeButton(R.string.cancel) { }
+            }
+        } else {
+            requestEyePageTurn()
+        }
+    }
+
+    private fun requestEyePageTurn() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            setEyePageTurnEnabled(true)
+        } else {
+            eyeCameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun recalibrateEyePageTurn() {
+        ReadBookConfig.eyePageCalibration = null
+        if (eyePageTurnEnabled) {
+            binding.readMenu.runMenuOut()
+            val turner = eyePageTurner
+            if (turner != null) {
+                turner.recalibrate()
+            } else {
+                startEyePageTurner()
+            }
+        } else {
+            toastOnUi(R.string.eye_page_recalibrate_not_running)
+        }
+    }
+
+    private fun toggleEyeGazePoint(item: MenuItem) {
+        val enabled = !ReadBookConfig.eyePageGazePointEnabled
+        ReadBookConfig.eyePageGazePointEnabled = enabled
+        item.isChecked = enabled
+        eyePageTurner?.setGazePointEnabled(enabled)
+    }
+
+    private fun showEyeGazePointSettings() {
+        fun dp(value: Int) = value.dpToPx()
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+        val colorRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(52)
+            isClickable = true
+            isFocusable = true
+            setBackgroundResource(android.R.drawable.list_selector_background)
+        }
+        val colorPreview = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+                marginEnd = dp(16)
+            }
+        }
+        eyeGazePointColorPreview = colorPreview
+        val colorLabel = TextView(this).apply {
+            text = getString(R.string.eye_page_gaze_point_color)
+            setTextColor(getPrimaryTextColor(ColorUtils.isColorLight(bottomBackground)))
+        }
+        colorRow.addView(colorPreview)
+        colorRow.addView(colorLabel)
+        content.addView(colorRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        updateEyeGazePointColorPreview()
+        colorRow.setOnClickListener { showEyeGazePointColorPicker() }
+
+        val alphaLabel = TextView(this).apply {
+            setTextColor(getPrimaryTextColor(ColorUtils.isColorLight(bottomBackground)))
+        }
+        val alphaSeek = SeekBar(this).apply {
+            max = 100
+            progress = ReadBookConfig.eyePageGazePointAlpha.coerceIn(0, max)
+        }
+        content.addView(alphaLabel, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(12)
+        })
+        content.addView(alphaSeek, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        alphaLabel.text = getString(R.string.eye_page_gaze_point_alpha, alphaSeek.progress)
+        alphaSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                ReadBookConfig.eyePageGazePointAlpha = progress
+                alphaLabel.text = getString(R.string.eye_page_gaze_point_alpha, progress)
+                eyePageTurner?.refreshGazePointStyle()
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+        })
+
+        val sizeLabel = TextView(this).apply {
+            setTextColor(getPrimaryTextColor(ColorUtils.isColorLight(bottomBackground)))
+        }
+        val sizeSeek = SeekBar(this).apply {
+            max = MAX_EYE_GAZE_POINT_SIZE_DP - MIN_EYE_GAZE_POINT_SIZE_DP
+            progress = (ReadBookConfig.eyePageGazePointSize - MIN_EYE_GAZE_POINT_SIZE_DP).coerceIn(0, max)
+        }
+        val selectedSize = sizeSeek.progress + MIN_EYE_GAZE_POINT_SIZE_DP
+        sizeLabel.text = getString(R.string.eye_page_gaze_point_size, selectedSize)
+        content.addView(sizeLabel, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(8)
+        })
+        content.addView(sizeSeek, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        sizeSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                val size = progress + MIN_EYE_GAZE_POINT_SIZE_DP
+                ReadBookConfig.eyePageGazePointSize = size
+                sizeLabel.text = getString(R.string.eye_page_gaze_point_size, size)
+                eyePageTurner?.refreshGazePointStyle()
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+        })
+
+        alert(title = getString(R.string.eye_page_gaze_point_settings)) {
+            customView { content }
+            positiveButton(android.R.string.ok)
+            onDismiss {
+                if (eyeGazePointColorPreview === colorPreview) eyeGazePointColorPreview = null
+            }
+        }
+    }
+
+    private fun updateEyeGazePointColorPreview() {
+        val preview = eyeGazePointColorPreview ?: return
+        preview.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(ReadBookConfig.eyePageGazePointColor)
+        }
+    }
+
+    private fun showEyeGazePointColorPicker() {
+        val dialog = ColorPickerDialogCompat.newBuilder()
+            .setDialogType(ColorPickerDialog.TYPE_PRESETS)
+            .setDialogTitle(R.string.eye_page_gaze_point_color)
+            .setColorShape(ColorShape.CIRCLE)
+            .setPresets(ColorPickerDialog.MATERIAL_COLORS)
+            .setAllowPresets(true)
+            .setAllowCustom(true)
+            .setShowAlphaSlider(false)
+            .setShowColorShades(true)
+            .setShowDefaultColorButton(true)
+            .setColor(ReadBookConfig.eyePageGazePointColor)
+            .setDialogId(EYE_GAZE_POINT_COLOR_DIALOG)
+            .create()
+        dialog.setColorPickerDialogListener(this)
+        dialog.show(supportFragmentManager, "eye_gaze_point_color")
+    }
+
+    private fun setEyePageTurnEnabled(enabled: Boolean) {
+        eyePageTurnEnabled = enabled
+        ReadBookConfig.eyePageTurnEnabled = enabled
+        menu?.findItem(R.id.menu_eye_page_turn)?.isChecked = enabled
+        if (enabled) {
+            autoPageStop()
+            binding.readMenu.runMenuOut()
+            startEyePageTurner()
+        } else {
+            eyePageTurner?.stop()
+            eyePageTurner = null
+        }
+        upScreenTimeOut()
+    }
+
+    private fun startEyePageTurner() {
+        if (!readerResumed || !eyePageTurnEnabled || isAutoPage || BaseReadAloudService.isPlay()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            setEyePageTurnEnabled(false)
+            toastOnUi(R.string.eye_page_unsupported)
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            setEyePageTurnEnabled(false)
+            toastOnUi(R.string.eye_page_permission_required)
+            return
+        }
+        if (eyePageTurner == null) {
+            eyePageTurner = EyePageTurner(this, binding.root, binding.readerContent,
+                readingBlockReason = {
+                    when {
+                        !readerResumed -> "not_resumed"
+                        !window.decorView.hasWindowFocus() -> "window_unfocused"
+                        menuLayoutIsVisible -> "menu_visible"
+                        binding.readAiPanel.isVisible -> "ai_panel_visible"
+                        isShowingSearchResult -> "search_visible"
+                        !isInitFinish -> "initializing"
+                        isAutoPage -> "auto_paging"
+                        BaseReadAloudService.isPlay() -> "read_aloud"
+                        binding.readView.isTextSelected -> "text_selected"
+                        textActionMenu.isShowing || popupAction.isShowing -> "text_menu"
+                        binding.readView.pageDelegate == null -> "no_page_delegate"
+                        binding.readView.pageDelegate?.isRunning == true -> "page_animation"
+                        binding.readView.curPage.textPage.isMsgPage -> "message_page"
+                        binding.readView.curPage.textPage.lines.isEmpty() -> "empty_page"
+                        else -> null
+                    }
+                },
+                canCalibrate = { readerResumed && window.decorView.hasWindowFocus() && !menuLayoutIsVisible },
+                onReadyChanged = { ready ->
+                    binding.readView.curPage.setEyePageHint(ready)
+                    binding.readView.invalidate()
+                },
+                onNextPage = {
+                    AppLog.putDebug("眼动翻页请求：chapter=${ReadBook.durChapterIndex} page=${ReadBook.durPageIndex} delegate=${binding.readView.pageDelegate?.javaClass?.simpleName}")
+                    keyPage(PageDirection.NEXT)
+                    screenOffTimerStart()
+                },
+                onError = { error ->
+                    AppLog.put("眼动翻页启动或识别失败", error)
+                    setEyePageTurnEnabled(false)
+                    toastOnUi(getString(R.string.eye_page_error, error.localizedMessage ?: error.javaClass.simpleName))
+                },
+                onCancel = { setEyePageTurnEnabled(false) })
+        }
+        eyePageTurner?.setGazePointEnabled(ReadBookConfig.eyePageGazePointEnabled)
+        eyePageTurner?.start()
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) eyePageTurner?.resetGesture()
+        return super.dispatchTouchEvent(event)
     }
 
     override fun upMenuView() {
@@ -1829,6 +2175,7 @@ class ReadBookActivity : BaseReadBookActivity(),
         // ReadBook 的内容加载协程在 IO 线程回调本方法；
         // 面板动画等 UI 操作只能在 Looper 线程执行，统一收敛到主线程。
         handler.post {
+            eyePageTurner?.resetGesture()
             if (!fromReadAloud && !ReadBook.skipReadAloudSyncOnce) {
                 onManualPageChanged()
             }
@@ -2157,8 +2504,18 @@ class ReadBookActivity : BaseReadBookActivity(),
         mode: ReadAloudUiState.ReaderPanelMode,
         action: () -> Unit,
     ) {
-        check(currentReadAloudPanelMode() == mode) {
-            "Read-aloud footer action no longer matches the current panel mode"
+        val current = currentReadAloudPanelMode()
+        if (current != mode) {
+            // 页脚回调捕获的 mode 是安装面板时的快照，与点击时现算的面板模式可能短暂
+            // 不一致（暂停态翻页/跨章后位置事件被观察者早退忽略、footer 未刷新）。
+            // 此处由点击事件触发，check 会直接崩溃进程：改为日志 + 刷新面板回调自愈
+            // （下次点击即匹配）+ 放弃本次动作。
+            AppLog.put(
+                "[朗读] 页脚动作模式不匹配：按钮=$mode 当前=$current，放弃执行",
+                module = LogModule.READ_ALOUD
+            )
+            updateReadAloudPanels()
+            return
         }
         expandReadAloudPanel(mode)
         action()
@@ -2297,7 +2654,13 @@ class ReadBookActivity : BaseReadBookActivity(),
     private fun shouldFollowAloudAdvance(
         prev: ReadAloudPosition?,
         current: ReadAloudPosition,
+        switchConfirmed: Boolean = false,
     ): Boolean {
+        // 用户双击换段/从本页读定位后，引擎发布的首个位置是「起点确认」，
+        // 不是自然朗读推进，此时不得拽动显示（setAloudStart 只写朗读起点）。
+        // switchConfirmed 由 ReadAloud.publishAloudPosition 在 pendingSwitchPosition 命中时生成，
+        // 无此短路时向前双击会把显示拽走（向后双击被下方单调性拦住，行为不对称）。
+        if (switchConfirmed) return false
         if (prev == null) return false
         if (current.chapterIndex != ReadBook.durChapterIndex) return false
         val chapter = ReadBook.curTextChapter ?: return false
@@ -2600,6 +2963,7 @@ class ReadBookActivity : BaseReadBookActivity(),
         if (isAutoPage) {
             autoPageStop()
         } else {
+            if (eyePageTurnEnabled) eyePageTurner?.stop()
             binding.readView.autoPager.start()
             binding.readMenu.setAutoPage(true)
             screenTimeOut = -1L
@@ -2613,6 +2977,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             binding.readMenu.setAutoPage(false)
             dismissDialogFragment<AutoReadDialog>()
             upScreenTimeOut()
+            if (eyePageTurnEnabled) startEyePageTurner()
         }
     }
 
@@ -2814,6 +3179,7 @@ class ReadBookActivity : BaseReadBookActivity(),
      */
     override fun onClickReadAloud() {
         autoPageStop()
+        if (eyePageTurnEnabled) eyePageTurner?.stop()
         when {
             !BaseReadAloudService.isRun -> {
                 if (AppConfig.readAloudFloatOnDesktop) {
@@ -3015,6 +3381,13 @@ class ReadBookActivity : BaseReadBookActivity(),
                 postEvent(EventBus.TIP_COLOR, "")
                 postEvent(EventBus.UP_CONFIG, arrayListOf(2))
             }
+
+            EYE_GAZE_POINT_COLOR_DIALOG -> {
+                ReadBookConfig.eyePageGazePointColor =
+                    if (color == ColorPickerDialogCompat.DEFAULT_COLOR) 0 else color
+                updateEyeGazePointColorPreview()
+                eyePageTurner?.refreshGazePointStyle()
+            }
         }
     }
 
@@ -3154,6 +3527,14 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     override fun addPageBookmark(): Boolean {
+        return savePageBookmark(showFeedback = true)
+    }
+
+    fun addPageBookmarkSilently(): Boolean {
+        return savePageBookmark(showFeedback = false)
+    }
+
+    private fun savePageBookmark(showFeedback: Boolean): Boolean {
         val book = ReadBook.book
         val page = ReadBook.curTextChapter?.getPage(ReadBook.durPageIndex)
         if (book == null || page == null) {
@@ -3170,7 +3551,7 @@ class ReadBookActivity : BaseReadBookActivity(),
                 it.bookText.trim() == pageText
         }
         if (exists) {
-            toastOnUi(R.string.page_bookmark_added)
+            if (showFeedback) toastOnUi(R.string.page_bookmark_added)
             return false
         }
         val bookmark = book.createBookMark().apply {
@@ -3183,8 +3564,26 @@ class ReadBookActivity : BaseReadBookActivity(),
         appDb.bookmarkDao.insert(bookmark)
         bookmarkLoadChapterIndex = -1
         upChapterBookmarks()
-        toastOnUi(R.string.page_bookmark_added)
+        if (showFeedback) toastOnUi(R.string.page_bookmark_added)
         return true
+    }
+
+    private val bluetoothUiHandler = object : BluetoothKeyMapping.UiHandler {
+        override fun pageBookmark(): Boolean = addPageBookmarkSilently()
+        override fun previousPage() = keyPage(PageDirection.PREV)
+        override fun nextPage() = keyPage(PageDirection.NEXT)
+        override fun toggleReadAloud() = onClickReadAloud()
+    }
+
+    fun handleBluetoothMediaKey(keyCode: Int): Boolean {
+        val key = BluetoothKeyMapping.keyForKeyCode(keyCode) ?: return false
+        if (!key.isMediaKey) return false
+        // An empty mapping is an explicit no-op; consume it instead of running legacy media actions.
+        val action = BluetoothKeyMapping.slotAction(key, this)
+        if (action == BluetoothKeyMapping.ACTION_NONE) {
+            return key.consumeWhenNone
+        }
+        return BluetoothKeyMapping.dispatch(action, this, bluetoothUiHandler)
     }
 
     /** 当前页是否有整页书签（按页首文字匹配） */
@@ -3531,10 +3930,15 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     override fun onDestroy() {
+        eyePageTurner?.stop()
+        eyePageTurner = null
         cancelAiChapterPurify()
         super.onDestroy()
         if (activeActivityRef?.get() === this) {
             activeActivityRef = null
+        }
+        if (readerInstanceRef?.get() === this) {
+            readerInstanceRef = null
         }
         postEvent(EventBus.READ_BOOK_ACTIVITY_ACTIVE, false)
         textActionMenu.dismiss()
@@ -3588,6 +3992,13 @@ class ReadBookActivity : BaseReadBookActivity(),
                 }
             }
         }
+        // 主链切主题（applyDayNight）后本 Activity 资源已由 AppCompat 就地刷新，
+        // 但已 inflate 的视图树不会自动重着色——与 MainActivity 一样 recreate 一次
+        // 保证全量一致。阅读页内 recreate=false 链（排版弹窗切日夜）不 post 该事件，
+        // 弹窗与其宿主不受影响。
+        observeEvent<String>(EventBus.RECREATE) {
+            recreate()
+        }
         observeEvent<Int>(EventBus.ALOUD_STATE) {
             AppLog.putDebug(
                 "[朗读] 状态事件:$it isRun:${BaseReadAloudService.isRun} pause:${BaseReadAloudService.pause}",
@@ -3596,6 +4007,11 @@ class ReadBookActivity : BaseReadBookActivity(),
             updateReadAloudPageFloating()
             if (it == Status.STOP) {
                 hideReadAloudPagePanel()
+                if (eyePageTurnEnabled) startEyePageTurner()
+            } else if (it == Status.PLAY) {
+                eyePageTurner?.stop()
+            } else if (it == Status.PAUSE && eyePageTurnEnabled) {
+                startEyePageTurner()
             }
             // 红字是 aloudPosition 的绘制期投影，播放状态变化（PLAY/PAUSE/STOP）
             // 只需触发一次重绘，投影内容由 TextLine.isReadAloud 在绘制时现算。
@@ -3657,13 +4073,49 @@ class ReadBookActivity : BaseReadBookActivity(),
                     )
                     return@launch
                 }
-                if (shouldFollowAloudAdvance(update.previousPosition, position)) {
+                // 翻页动画期间不得跟随写。
+                // PageDelegate.onAnimStop() 才真正推进页面，动画期间 curPage 仍是旧页，
+                // 跟随判定会误判为「显示页 == 朗读出发页」从而中途改 durChapterPos
+                // 并重渲染，动画结束后 fillPage() 再推进一次 → 页面回跳/多跳。
+                // 红字投影已由上面的 invalidateReadAloudHighlight 失效缓存，不受影响。
+                //
+                // 判据必须区分「真动画」与「滚动跟手」：
+                // ScrollPageDelegate 的拖动 (onTouch) 只置 isRunning 不置 isStarted，
+                // 而 isStarted 仅由基类 startScroll()/fling() 置位（二者同时置 isRunning）。
+                // 若只用 isRunning，滚动模式（听书主用模式）下用户一拖动就会整段丢弃
+                // 位置事件；又因 stopScroll() 的 isRunning=false 在 post{} 内延迟执行，
+                // 松手后还会多丢一帧。丢弃期间引擎侧已前移 previousPosition，导致
+                // 跟随判定滞后累积。故滚动模式只在真正有滚动动画时才丢弃。
+                val delegate = binding.readView.pageDelegate
+                val inPageAnim = delegate != null && delegate.isRunning &&
+                    (delegate !is ScrollPageDelegate || delegate.isStarted)
+                if (inPageAnim) {
+                    AppLog.putDebug(
+                        "[朗读] 位置事件忽略(翻页动画中) pos:${position.chapterPosition}",
+                        module = LogModule.READ_ALOUD
+                    )
+                    // 面板刷新是本函数的统一收尾，早退也必须执行，否则丢弃期间面板状态停更。
+                    updateReadAloudPanels()
+                    return@launch
+                }
+                if (shouldFollowAloudAdvance(
+                        update.previousPosition,
+                        position,
+                        update.switchConfirmed
+                    )
+                ) {
                     AppLog.putDebug(
                         "[朗读] 跟随写显示 pos:${position.chapterPosition}",
                         module = LogModule.READ_ALOUD
                     )
                     ReadBook.durChapterPos = position.chapterPosition
-                    upContent()
+                    // 跟随写后立即落库（异步），避免进程被杀丢失听书进度。
+                    // 不传 pageChanged=true：那会跳过书源 SAVE_READ 回调，
+                    // 而跟随写是持续行为，不能长期跳过。
+                    ReadBook.saveRead()
+                    // 滚动模式下 resetPageOffset=true 会清零滚动偏移，
+                    // 导致每次朗读位置事件都把用户拽回页首
+                    upContent(resetPageOffset = false)
                 } else {
                     AppLog.putDebug(
                         "[朗读] 不跟随 显示页与朗读出发页不同 显示pos:${ReadBook.durChapterPos} " +
@@ -3745,14 +4197,14 @@ class ReadBookActivity : BaseReadBookActivity(),
      */
     override fun screenOffTimerStart() {
         handler.post {
-            if (screenTimeOut < 0) {
+            handler.removeCallbacks(screenOffRunnable)
+            if (screenTimeOut < 0 || (readerResumed && eyePageTurnEnabled)) {
                 keepScreenOn(true)
                 return@post
             }
             val t = screenTimeOut - sysScreenOffTime
             if (t > 0) {
                 keepScreenOn(true)
-                handler.removeCallbacks(screenOffRunnable)
                 handler.postDelayed(screenOffRunnable, screenTimeOut)
             } else {
                 keepScreenOn(false)
@@ -3762,13 +4214,20 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     companion object {
         const val RESULT_DELETED = 100
+        private const val EYE_GAZE_POINT_COLOR_DIALOG = 127
+        private const val MIN_EYE_GAZE_POINT_SIZE_DP = 8
+        private const val MAX_EYE_GAZE_POINT_SIZE_DP = 64
         /** 回退设置音频书直进听书页：intent extra，值为 handoff 模式 */
         const val EXTRA_DIRECT_AUDIO_PLAY = "directAudioPlay"
         const val DIRECT_AUDIO_PLAY_ALL = "all"
         const val DIRECT_AUDIO_PLAY_IF_NO_SUBTITLE = "ifNoSubtitle"
         private var activeActivityRef: WeakReference<ReadBookActivity>? = null
+        // Keep the reader through onStop so media keys can still act while the screen is off.
+        private var readerInstanceRef: WeakReference<ReadBookActivity>? = null
 
         fun activeActivity(): ReadBookActivity? = activeActivityRef?.get()
+
+        fun readerInstance(): ReadBookActivity? = readerInstanceRef?.get()
     }
 
 }

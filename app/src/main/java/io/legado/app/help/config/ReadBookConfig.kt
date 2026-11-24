@@ -26,10 +26,12 @@ import io.legado.app.utils.getFile
 import io.legado.app.utils.getMeanColor
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.getPrefInt
+import io.legado.app.utils.getPrefString
 import io.legado.app.utils.hexString
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.putPrefBoolean
 import io.legado.app.utils.putPrefInt
+import io.legado.app.utils.putPrefString
 import io.legado.app.utils.resizeAndRecycle
 import splitties.init.appCtx
 import java.io.File
@@ -41,6 +43,37 @@ import androidx.core.graphics.drawable.toDrawable
 @Suppress("ConstPropertyName")
 @Keep
 object ReadBookConfig {
+    var eyePageTurnHelpShown: Boolean
+        get() = appCtx.getPrefBoolean("eyePageTurnHelpShown", false)
+        set(value) = appCtx.putPrefBoolean("eyePageTurnHelpShown", value)
+
+    var eyePageTurnEnabled: Boolean
+        get() = appCtx.getPrefBoolean("eyePageTurnEnabled", false)
+        set(value) = appCtx.putPrefBoolean("eyePageTurnEnabled", value)
+
+    var eyePageCalibration: String?
+        get() = appCtx.getPrefString("eyePageCalibration")
+        set(value) = appCtx.putPrefString("eyePageCalibration", value)
+
+    var eyePageGazePointEnabled: Boolean
+        get() = appCtx.getPrefBoolean("eyePageGazePointEnabled", false)
+        set(value) = appCtx.putPrefBoolean("eyePageGazePointEnabled", value)
+
+    var eyePageGazePointColor: Int
+        // 未设置（0 或首次使用）默认为灰色；颜色本体恒定不透明，透明度单独由
+        // eyePageGazePointAlpha 控制，避免填充与描边透明度各自拆层。
+        get() = appCtx.getPrefInt("eyePageGazePointColor", 0)
+            .takeIf { it != 0 } ?: 0xFF9E9E9E.toInt()
+        set(value) = appCtx.putPrefInt("eyePageGazePointColor", value)
+
+    var eyePageGazePointAlpha: Int
+        get() = appCtx.getPrefInt("eyePageGazePointAlpha", 20)
+        set(value) = appCtx.putPrefInt("eyePageGazePointAlpha", value)
+
+    var eyePageGazePointSize: Int
+        get() = appCtx.getPrefInt("eyePageGazePointSize", 20)
+        set(value) = appCtx.putPrefInt("eyePageGazePointSize", value)
+
     const val configFileName = "readConfig.json"
     const val shareConfigFileName = "shareReadConfig.json"
     private const val activeReadConfigFileName = "activeReadConfig.json"

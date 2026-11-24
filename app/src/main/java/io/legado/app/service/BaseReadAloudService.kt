@@ -32,6 +32,7 @@ import android.support.v4.media.session.PlaybackStateCompat
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewOutlineProvider
@@ -88,6 +89,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import splitties.init.appCtx
 import splitties.systemservices.audioManager
 import splitties.systemservices.notificationManager
@@ -307,6 +311,7 @@ abstract class BaseReadAloudService : BaseService(),
 
     @Volatile
     private var preparedReadAloudStartRequest = -1L
+    private val readAloudPrepareMutex = Mutex()
 
     internal fun minReadAloudPreloadLength(): Int {
         return MIN_READ_ALOUD_PRELOAD_LENGTH
@@ -946,17 +951,26 @@ abstract class BaseReadAloudService : BaseService(),
             return
         }
         if (obstruction.active) {
-            check(
-                obstruction.topOnScreen >= 0 &&
-                    obstruction.bottomOnScreen > obstruction.topOnScreen
+            // bounds 来自外部上报（旋转/窗口切换/异常 insets 时可为非法区间），
+            // 抛 IllegalArgumentException 会直接崩溃朗读服务；改为记录并跳过该避让源。
+            //
+            // 注意不能在此 return：本函数末尾的 applyReadAloudFloatingAvoidance() 是唯一调用点，
+            // 早退会跳过它；且该 source 上一轮留下的合法区间不会被清除，悬浮窗会被一个
+            // 已经不存在的遮挡区持续挤走。故非法时清除陈旧项后继续走到末尾统一后处理。
+            if (obstruction.topOnScreen < 0 ||
+                obstruction.bottomOnScreen <= obstruction.topOnScreen
             ) {
-                "Read-aloud floating obstruction has invalid bounds: " +
-                    "[${obstruction.topOnScreen}, ${obstruction.bottomOnScreen}]"
+                AppLog.put(
+                    "朗读悬浮窗避让源 bounds 非法，忽略: " +
+                        "[${obstruction.topOnScreen}, ${obstruction.bottomOnScreen}]"
+                )
+                avoidanceBounds.remove(obstruction.source)
+            } else {
+                avoidanceBounds[obstruction.source] = FloatingAvoidanceBounds(
+                    obstruction.topOnScreen,
+                    obstruction.bottomOnScreen,
+                )
             }
-            avoidanceBounds[obstruction.source] = FloatingAvoidanceBounds(
-                obstruction.topOnScreen,
-                obstruction.bottomOnScreen,
-            )
         } else {
             avoidanceBounds.remove(obstruction.source)
         }
@@ -1071,43 +1085,41 @@ abstract class BaseReadAloudService : BaseService(),
         pageIndex: Int,
         startPos: Int,
     ) {
-        execute(executeContext = IO) {
-            if (request != readAloudStartRequest) return@execute
-            val textChapter = ReadBook.curTextChapter
-            if (!sessionChapterCanStartWithoutText) {
-                val chapter = textChapter ?: run {
-                    cancelReadAloudStart(request)
-                    return@execute
+        execute {
+            // 章节准备会修改共享播放字段；旧请求必须退出后新请求才能准备。
+            readAloudPrepareMutex.withLock {
+                if (request != readAloudStartRequest) return@withLock
+                val textChapter = ReadBook.curTextChapter
+                var preparedText = false
+                if (!sessionChapterCanStartWithoutText) {
+                    if (textChapter == null ||
+                        !prepareReadAloudChapter(textChapter, pageIndex, startPos)
+                    ) {
+                        cancelReadAloudStart(request)
+                        return@withLock
+                    }
+                    preparedText = true
+                } else {
+                    currentChapterIndex = ReadBook.durChapterIndex
+                    textChapter?.takeIf { tc ->
+                        tc.chapter.index == currentChapterIndex &&
+                            tc.isCompleted && tc.pageSize > 0
+                    }?.let { tc ->
+                        if (!prepareReadAloudChapter(tc, pageIndex, startPos)) {
+                            cancelReadAloudStart(request)
+                            return@withLock
+                        }
+                        preparedText = true
+                    }
                 }
-                if (!prepareReadAloudChapter(chapter, pageIndex, startPos)) {
-                    cancelReadAloudStart(request)
-                    return@execute
-                }
-                preparedReadAloudStartRequest = request
-                publishPreparedAloudPosition()
-                launch(Main) {
-                    if (request != readAloudStartRequest) return@launch
+                // 与 requestReadAloud 的令牌递增同在主线程，中间没有挂起点。
+                withContext(Main) {
+                    if (request != readAloudStartRequest) return@withContext
+                    preparedReadAloudStartRequest = request
+                    if (preparedText) publishParagraphProgress()
+                    publishPreparedAloudPosition()
                     if (play) play() else pageChanged = true
                 }
-                return@execute
-            }
-            // 书源音频：会话章节身份先由统一阅读目标（ReadBook.durChapterIndex）确定，
-            // 正文 TextChapter 只在 index 与该目标相同时用于段落/LRC 准备，绝不反向决定当前章节。
-            currentChapterIndex = ReadBook.durChapterIndex
-            textChapter?.takeIf { tc ->
-                tc.chapter.index == currentChapterIndex &&
-                    tc.isCompleted && tc.pageSize > 0
-            }?.let { tc ->
-                if (!prepareReadAloudChapter(tc, pageIndex, startPos)) {
-                    cancelReadAloudStart(request)
-                    return@execute
-                }
-            }
-            preparedReadAloudStartRequest = request
-            publishPreparedAloudPosition()
-            launch(Main) {
-                if (request != readAloudStartRequest) return@launch
-                if (play) play() else pageChanged = true
             }
         }.onError {
             cancelReadAloudStart(request)
@@ -1115,8 +1127,8 @@ abstract class BaseReadAloudService : BaseService(),
         }
     }
 
-    private fun cancelReadAloudStart(request: Long) {
-        if (request != readAloudStartRequest) return
+    private suspend fun cancelReadAloudStart(request: Long) = withContext(Main) {
+        if (request != readAloudStartRequest) return@withContext
         preparedReadAloudStartRequest = -1L
         ReadAloud.cancelPositionSwitch()
     }
@@ -1132,15 +1144,13 @@ abstract class BaseReadAloudService : BaseService(),
             return false
         }
         if (chapter.pageSize <= 0) {
-            stopReadAloudOnInvalidPosition("Read aloud chapter has no page")
-            return false
+            error("Read aloud chapter has no page")
         }
         val safePageIndex = pageIndex.coerceIn(0, chapter.pageSize - 1)
         this@BaseReadAloudService.pageIndex = safePageIndex
         val page = chapter.getPage(safePageIndex)
         if (page == null) {
-            stopReadAloudOnInvalidPosition("Read aloud page is null, pageIndex=$safePageIndex")
-            return false
+            error("Read aloud page is null, pageIndex=$safePageIndex")
         }
         readAloudNumber = chapter.getReadLength(safePageIndex) + startPos.coerceAtLeast(0)
         // 朗读单元只由 pageSplit 有效值决定；滚动模式锁定关闭（无页界概念）。
@@ -1166,7 +1176,6 @@ abstract class BaseReadAloudService : BaseService(),
                 "number:$readAloudNumber nowSpeak:$nowSpeak offset:$paragraphStartPos " +
                 "byPage:$pageSplit toLast:${chapter.getLastParagraphPosition() == readAloudNumber}"
         )
-        publishParagraphProgress()
         return true
     }
 
@@ -1568,31 +1577,65 @@ abstract class BaseReadAloudService : BaseService(),
         )
         mediaSessionCompat.setCallback(object : MediaSessionCompat.Callback() {
             override fun onPlay() {
-                resumeReadAloud()
+                if (!MediaButtonReceiver.handleReaderMediaKey(
+                        this@BaseReadAloudService,
+                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                    )
+                ) {
+                    resumeReadAloud()
+                }
             }
 
             override fun onPause() {
-                pauseReadAloud()
+                if (!MediaButtonReceiver.handleReaderMediaKey(
+                        this@BaseReadAloudService,
+                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                    )
+                ) {
+                    pauseReadAloud()
+                }
             }
 
             override fun onSkipToNext() {
-                if (getPrefBoolean("mediaButtonPerNext", false)) {
-                    nextChapter(syncView = true)
-                } else {
-                    nextP()
-                }
+                if (MediaButtonReceiver.handleReaderMediaKey(
+                        this@BaseReadAloudService,
+                        KeyEvent.KEYCODE_MEDIA_NEXT
+                    )
+                ) return
+                nextP()
             }
 
             override fun onSkipToPrevious() {
-                if (getPrefBoolean("mediaButtonPerNext", false)) {
-                    prevChapter(syncView = true)
-                } else {
-                    prevP()
-                }
+                if (MediaButtonReceiver.handleReaderMediaKey(
+                        this@BaseReadAloudService,
+                        KeyEvent.KEYCODE_MEDIA_PREVIOUS
+                    )
+                ) return
+                prevP()
             }
 
             override fun onStop() {
                 stopSelf()
+            }
+
+            override fun onFastForward() {
+                if (!MediaButtonReceiver.handleReaderMediaKey(
+                        this@BaseReadAloudService,
+                        KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
+                    )
+                ) {
+                    super.onFastForward()
+                }
+            }
+
+            override fun onRewind() {
+                if (!MediaButtonReceiver.handleReaderMediaKey(
+                        this@BaseReadAloudService,
+                        KeyEvent.KEYCODE_MEDIA_REWIND
+                    )
+                ) {
+                    super.onRewind()
+                }
             }
 
             override fun onCustomAction(action: String, extras: Bundle?) {

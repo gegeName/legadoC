@@ -58,6 +58,7 @@ fun View.showPopupMenu(
 fun View.showPopupMenu(
     @MenuRes menuRes: Int,
     prepare: (Menu.() -> Unit)? = null,
+    onLongClick: ((MenuItem) -> Unit)? = null,
     onClick: (MenuItem) -> Boolean
 ): Boolean {
     val popup = SurfacePopupMenu(context, this)
@@ -66,6 +67,7 @@ fun View.showPopupMenu(
         prepare?.invoke(menu)
         menu.applyUiMenuStyle(context)
         setOnMenuItemClickListener(onClick)
+        setOnMenuItemLongClickListener(onLongClick)
         show()
     }
     return true

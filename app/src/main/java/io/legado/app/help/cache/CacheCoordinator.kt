@@ -202,7 +202,10 @@ object CacheCoordinator : CacheUiPort {
         return if (book.isAudio || book.isVideo) {
             submitMediaDownload(book, chapterIndexes, source, reviewEnabled, reviewIncremental)
         } else {
-            submitTextDownload(book, chapterIndexes, source, reviewEnabled, reviewIncremental)
+            submitTextDownload(
+                book, chapterIndexes, source, reviewEnabled,
+                reviewIncremental = reviewIncremental,
+            )
         }
     }
 
@@ -379,6 +382,29 @@ object CacheCoordinator : CacheUiPort {
     /** Record a reader-requested review refresh without exposing the queue manager. */
     fun markReviewRefresh(bookUrl: String, chapterIndex: Int) {
         ReviewSnapshotManager.markUserRefresh(bookUrl, chapterIndex)
+    }
+
+    /** 显式刷新通过正文/媒体前置任务接续 REVIEW，不丢弃尚无离线正文的章节。 */
+    fun submitReviewDownload(
+        book: Book,
+        chapterIndexes: Iterable<Int>,
+        incremental: Boolean = true,
+    ): CacheSubmission? {
+        if (!AppConfig.syncCacheReview || book.isLocal || book.isVideo) return null
+        val indexes = chapterIndexes.distinct().filter { index ->
+            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index)
+                ?: error("刷新评论时章节不存在：${book.name} / $index")
+            !chapter.isVolume
+        }
+        if (indexes.isEmpty()) return null
+        indexes.forEach { ReviewSnapshotManager.markUserRefresh(book.bookUrl, it) }
+        return submitBookDownload(
+            book = book,
+            chapterIndexes = indexes,
+            source = CacheRequestSource.READER,
+            reviewEnabled = true,
+            reviewIncremental = incremental,
+        )
     }
 
     /** Cache-management retry boundary for one chapter's recorded failed review buttons. */

@@ -32,6 +32,8 @@ class MobiFile(var book: Book) {
         @Synchronized
         private fun getMFile(book: Book): MobiFile {
             if (mFile == null || mFile?.book?.bookUrl != book.bookUrl) {
+                // 换书前显式关闭旧文件的描述符，避免静态单例长期持有 fd
+                mFile?.close()
                 mFile = MobiFile(book)
                 return mFile!!
             }
@@ -59,7 +61,10 @@ class MobiFile(var book: Book) {
             return getMFile(book).upBookInfo()
         }
 
+        @Synchronized
         fun clear() {
+            // 置空前显式关闭文件描述符，避免 fd 滞留
+            mFile?.close()
             mFile = null
         }
     }
@@ -77,6 +82,17 @@ class MobiFile(var book: Book) {
         upBookCover(true)
     }
 
+    private fun close() {
+        val descriptor = fileDescriptor
+        fileDescriptor = null
+        mobiBook = null
+        try {
+            descriptor?.close()
+        } catch (error: Exception) {
+            AppLog.put("关闭 Mobi 文件失败", error)
+        }
+    }
+
     private fun readMobi(): MobiBook? {
         return kotlin.runCatching {
             BookHelp.getBookPFD(book)?.let {
@@ -84,6 +100,7 @@ class MobiFile(var book: Book) {
                 MobiReader().readMobi(it)
             }
         }.onFailure {
+            close()
             AppLog.put("读取Mobi文件失败\n${it.localizedMessage}", it)
         }.getOrThrow()
     }
@@ -303,6 +320,8 @@ class MobiFile(var book: Book) {
 
     private fun upBookInfo() {
         if (mobiBook == null) {
+            // 文件已损坏不可读：关闭 fd 后丢弃单例，避免残缺实例继续持有描述符
+            close()
             mFile = null
             book.intro = "书籍导入异常"
         } else {

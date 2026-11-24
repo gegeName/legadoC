@@ -405,45 +405,41 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
     }
 
     fun refreshContentDur(book: Book) {
-        CacheCoordinator.markReviewRefresh(book.bookUrl, ReadBook.durChapterIndex)
+        val index = ReadBook.durChapterIndex
         execute {
-            appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex)
-                ?.let { chapter ->
-                    BookHelp.delContent(book, chapter)
-                    ReadBook.loadContent(ReadBook.durChapterIndex, resetPageOffset = false)
-                }
+            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index)
+                ?: error("刷新时章节不存在：${book.name} / $index")
+            BookHelp.delContent(book, chapter)
+            CacheCoordinator.submitReviewDownload(book, listOf(index))
+            ReadBook.loadContent(index, resetPageOffset = false)
+        }.onError {
+            AppLog.put("刷新章节失败", it, true)
         }
     }
 
     fun refreshContentAfter(book: Book) {
-        // 当前章及之后全部章节：按章节逐个打强制重抓标记
-        appDb.bookChapterDao.getChapterList(
-            book.bookUrl,
-            ReadBook.durChapterIndex,
-            book.totalChapterNum
-        ).forEach { chapter ->
-            CacheCoordinator.markReviewRefresh(book.bookUrl, chapter.index)
-        }
+        val startIndex = ReadBook.durChapterIndex
         execute {
-            appDb.bookChapterDao.getChapterList(
-                book.bookUrl,
-                ReadBook.durChapterIndex,
-                book.totalChapterNum
-            ).forEach { chapter ->
-                BookHelp.delContent(book, chapter)
-            }
+            val chapters = appDb.bookChapterDao.getChapterList(
+                book.bookUrl, startIndex, book.totalChapterNum
+            )
+            chapters.forEach { BookHelp.delContent(book, it) }
+            CacheCoordinator.submitReviewDownload(book, chapters.map { it.index })
             ReadBook.loadContent(false)
+        }.onError {
+            AppLog.put("刷新后续章节失败", it, true)
         }
     }
 
     fun refreshContentAll(book: Book) {
-        // 全书刷新：按章节逐个打强制重抓标记
-        appDb.bookChapterDao.getChapterList(book.bookUrl).forEach { chapter ->
-            CacheCoordinator.markReviewRefresh(book.bookUrl, chapter.index)
-        }
         execute {
+            val chapters = appDb.bookChapterDao.getChapterList(book.bookUrl)
             BookHelp.clearCache(book)
+            // 先清缓存，再由统一前置任务重建正文/媒体，成功章节才进入评论阶段。
+            CacheCoordinator.submitReviewDownload(book, chapters.map { it.index })
             ReadBook.loadContent(false)
+        }.onError {
+            AppLog.put("刷新全书失败", it, true)
         }
     }
 

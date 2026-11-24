@@ -532,8 +532,12 @@ object ReadManga : CoroutineScope by MainScope() {
                 null,
                 BookProgressComparison.LOCAL_NEWER -> {
                     Coroutine.async {
-                        AppWebDav.uploadBookProgress(BookProgress(book), uploadSuccessAction)
-                        book.update()
+                        AppWebDav.uploadBookProgress(BookProgress(book)) {
+                            // 只有上传成功才推进同步水位；断网、鉴权失败不能标成已同步。
+                            book.syncTime = System.currentTimeMillis()
+                            book.update()
+                            uploadSuccessAction?.invoke()
+                        }
                     }
                 }
                 BookProgressComparison.REMOTE_NEWER -> {

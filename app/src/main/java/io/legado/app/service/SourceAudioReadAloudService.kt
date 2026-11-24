@@ -213,10 +213,14 @@ class SourceAudioReadAloudService : BaseReadAloudService(), Player.Listener {
     }
 
     override fun setPlaybackSpeed(speed: Float) {
-        require(speed.isFinite() && speed in 0.5f..3.0f) {
-            "书源音频速度超出范围：$speed"
+        if (!speed.isFinite() || speed !in 0.5f..3.0f) {
+            AppLog.put("设置书源音频速度失败：非法速度 $speed", toast = true)
+            return
         }
-        val book = requireNotNull(ReadBook.book) { "设置书源音频速度时当前书籍为空" }
+        val book = ReadBook.book ?: run {
+            AppLog.put("设置书源音频速度失败：当前书籍为空", toast = true)
+            return
+        }
         book.setPlaySpeed(speed)
         lifecycleScope.launch(IO) { book.save() }
         player.setPlaybackSpeed(speed)
